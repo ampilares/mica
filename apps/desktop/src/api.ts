@@ -196,7 +196,8 @@ export type CanvasOp =
   | { op: "add_cell"; cell: SceneCell }
   | { op: "update_cell"; cell: SceneCell }
   | { op: "remove_cell"; id: string }
-  | { op: "rename_scene"; name: string };
+  | { op: "rename_scene"; name: string }
+  | { op: "reorder_cell"; id: string; to_index: number };
 
 // ---- commands ----
 
@@ -218,6 +219,14 @@ export const api = {
   noteRename: (path: string, newPath: string) =>
     invoke<string>("note_rename", { path, newPath }),
   noteDelete: (path: string) => invoke<void>("note_delete", { path }),
+  noteDuplicate: (path: string) => invoke<LoadedFile>("note_duplicate", { path }),
+  assetSave: (name: string, dataBase64: string) =>
+    invoke<string>("asset_save", { name, dataBase64 }),
+  vaultBackup: () => invoke<{ folder: string; files: number }>("vault_backup"),
+  vaultImportFolder: (src: string, destDir?: string) =>
+    invoke<number>("vault_import_folder", { src, destDir }),
+  vaultExport: (paths: string[], dest: string) =>
+    invoke<number>("vault_export", { paths, dest }),
 
   conflictResolve: (
     path: string,

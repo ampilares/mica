@@ -9,7 +9,9 @@
 pub mod extract;
 pub mod frontmatter;
 pub mod note;
+pub mod rewrite;
 
 pub use extract::{extract_metadata, ExtractedLink, LinkKind, NoteMetadata};
 pub use frontmatter::Frontmatter;
 pub use note::{split_frontmatter, NoteDocument};
+pub use rewrite::rewrite_links;

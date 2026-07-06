@@ -21,6 +21,9 @@ interface AppStore {
   conflict: ConflictState | null;
   quickSwitcherOpen: boolean;
   searchOpen: boolean;
+  commandPaletteOpen: boolean;
+  rightPanelOpen: boolean;
+  dataExplainerOpen: boolean;
   saveStatus: "idle" | "saving" | "saved" | "error";
 
   setVault: (v: VaultInfo | null) => void;
@@ -32,6 +35,9 @@ interface AppStore {
   setConflict: (c: ConflictState | null) => void;
   setQuickSwitcherOpen: (open: boolean) => void;
   setSearchOpen: (open: boolean) => void;
+  setCommandPaletteOpen: (open: boolean) => void;
+  setRightPanelOpen: (open: boolean) => void;
+  setDataExplainerOpen: (open: boolean) => void;
   setSaveStatus: (s: AppStore["saveStatus"]) => void;
 }
 
@@ -43,6 +49,9 @@ export const useStore = create<AppStore>((set, get) => ({
   conflict: null,
   quickSwitcherOpen: false,
   searchOpen: false,
+  commandPaletteOpen: false,
+  rightPanelOpen: true,
+  dataExplainerOpen: false,
   saveStatus: "idle",
 
   setVault: (vault) => set({ vault, tabs: [], activePath: null, tree: null }),
@@ -90,6 +99,9 @@ export const useStore = create<AppStore>((set, get) => ({
   setConflict: (conflict) => set({ conflict }),
   setQuickSwitcherOpen: (quickSwitcherOpen) => set({ quickSwitcherOpen }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
+  setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
+  setRightPanelOpen: (rightPanelOpen) => set({ rightPanelOpen }),
+  setDataExplainerOpen: (dataExplainerOpen) => set({ dataExplainerOpen }),
   setSaveStatus: (saveStatus) => set({ saveStatus }),
 }));
 

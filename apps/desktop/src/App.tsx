@@ -12,6 +12,9 @@ import QuickSwitcher from "./components/QuickSwitcher";
 import SearchPanel from "./components/SearchPanel";
 import ConflictDialog from "./components/ConflictDialog";
 import StatusBar from "./components/StatusBar";
+import CommandPalette from "./components/CommandPalette";
+import RightPanel from "./components/RightPanel";
+import DataExplainer from "./components/DataExplainer";
 import { docEvents } from "./docEvents";
 
 export default function App() {
@@ -32,6 +35,12 @@ export default function App() {
       } else if (mod && e.shiftKey && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setSearchOpen(true);
+      } else if (mod && e.key === "k") {
+        e.preventDefault();
+        useStore.getState().setCommandPaletteOpen(true);
+      } else if (mod && e.key === "\\") {
+        e.preventDefault();
+        useStore.getState().setRightPanelOpen(!useStore.getState().rightPanelOpen);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -90,9 +99,12 @@ export default function App() {
         </div>
         <StatusBar />
       </div>
+      <RightPanel />
       <QuickSwitcher />
       <SearchPanel />
+      <CommandPalette />
       <ConflictDialog />
+      <DataExplainer />
     </div>
   );
 }

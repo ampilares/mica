@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, isApiError } from "../api";
 import { useStore } from "../store";
+import { compactDiff, diffLines, DiffLine } from "../diff";
 
 /**
  * Shown when a save hit a newer on-disk version, or an external edit arrived
@@ -12,6 +13,20 @@ export default function ConflictDialog() {
   const refreshTree = useStore((s) => s.refreshTree);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [diff, setDiff] = useState<DiffLine[] | null>(null);
+
+  useEffect(() => {
+    if (!conflict) {
+      setDiff(null);
+      return;
+    }
+    api
+      .noteLoad(conflict.path)
+      .then((theirs) =>
+        setDiff(compactDiff(diffLines(conflict.myContent, theirs.content))),
+      )
+      .catch(() => setDiff(null));
+  }, [conflict]);
 
   if (!conflict) return null;
 
@@ -57,6 +72,22 @@ export default function ConflictDialog() {
           <code>{conflict.path}</code> was modified outside the editor while you
           had unsaved changes. Choose how to resolve:
         </p>
+        {diff && (
+          <div className="conflict-diff">
+            <div className="muted small">
+              <span className="diff-key removed">mine</span> vs{" "}
+              <span className="diff-key added">on disk</span>
+            </div>
+            <pre>
+              {diff.map((line, i) => (
+                <div key={i} className={`diff-line ${line.kind}`}>
+                  {line.kind === "added" ? "+ " : line.kind === "removed" ? "- " : "  "}
+                  {line.text}
+                </div>
+              ))}
+            </pre>
+          </div>
+        )}
         <div className="conflict-actions">
           <button disabled={busy} onClick={() => resolve("keep_mine")}>
             Keep mine

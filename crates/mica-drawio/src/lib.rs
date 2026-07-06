@@ -344,6 +344,8 @@ pub enum CanvasOp {
     UpdateCell { cell: SceneCell },
     RemoveCell { id: String },
     RenameScene { name: String },
+    /// Move a cell to a new z-order position (cell order = z-order).
+    ReorderCell { id: String, to_index: usize },
 }
 
 pub fn apply_canvas_ops(scene: &mut Scene, ops: &[CanvasOp]) -> Result<()> {
@@ -378,6 +380,13 @@ pub fn apply_canvas_ops(scene: &mut Scene, ops: &[CanvasOp]) -> Result<()> {
             }
             CanvasOp::RenameScene { name } => {
                 scene.name = name.clone();
+            }
+            CanvasOp::ReorderCell { id, to_index } => {
+                if let Some(pos) = scene.cells.iter().position(|c| &c.id == id) {
+                    let cell = scene.cells.remove(pos);
+                    let idx = (*to_index).min(scene.cells.len());
+                    scene.cells.insert(idx, cell);
+                }
             }
         }
     }

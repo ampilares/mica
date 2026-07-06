@@ -168,6 +168,11 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
       className={`tree-item file ${activePath === node.path ? "active" : ""}`}
       style={{ paddingLeft: depth * 14 + 8 }}
       onClick={onOpen}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("application/x-mica-path", node.path);
+        e.dataTransfer.effectAllowed = "link";
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         setMenuOpen(true);
@@ -177,6 +182,20 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
       {menuOpen && (
         <div className="context-menu" onMouseLeave={() => setMenuOpen(false)}>
           <button onClick={(e) => { e.stopPropagation(); onRename(); }}>Rename</button>
+          <button
+            onClick={async (e) => {
+              e.stopPropagation();
+              setMenuOpen(false);
+              try {
+                await api.noteDuplicate(node.path);
+                await refreshTree();
+              } catch (err) {
+                alert(`Duplicate failed: ${JSON.stringify(err)}`);
+              }
+            }}
+          >
+            Duplicate
+          </button>
           <button onClick={(e) => { e.stopPropagation(); onDelete(); }}>Delete</button>
           <button
             onClick={(e) => {

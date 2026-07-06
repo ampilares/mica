@@ -46,8 +46,9 @@ fn open_vault_inner(app: &AppHandle, state: &AppState, vault: Vault) -> ApiResul
         .join("index")
         .join("index.db");
     let mut index = SearchIndex::open(&index_path).map_err(ApiError::from)?;
-    // MVP: full rebuild on open. Warm-start diffing comes with the perf phase.
-    index.rebuild(&vault).map_err(ApiError::from)?;
+    // Warm start: reconcile by (mtime, size); only changed files re-parse
+    // (NFR-PERF-001). A fresh/mismatched index degenerates to a full build.
+    index.sync(&vault).map_err(ApiError::from)?;
     let index = Arc::new(Mutex::new(index));
 
     // Watcher → incremental index updates + push events to the frontend.
@@ -263,12 +264,155 @@ pub fn note_rename(
     let open = state.current().map_err(ApiError::from)?;
     let from = VaultPath::new(&path).map_err(ApiError::from)?;
     let to = VaultPath::new(&new_path).map_err(ApiError::from)?;
+
+    // Find referrers before the index forgets the old path.
+    let referrers: Vec<VaultPath> = {
+        let idx = open.index.lock().unwrap();
+        idx.backlinks(&from)
+            .map(|hits| hits.into_iter().map(|h| h.source).collect())
+            .unwrap_or_default()
+    };
+
     open.vault.rename(&from, &to).map_err(ApiError::from)?;
+
+    // Rewrite relative markdown links in referring notes (minimal diffs).
+    for source in referrers {
+        let Ok((content, _)) = open.vault.read_text(&source) else {
+            continue;
+        };
+        if let Some(rewritten) = mica_markdown::rewrite_links(
+            &content,
+            source.as_str(),
+            from.as_str(),
+            to.as_str(),
+        ) {
+            if let Ok(hash) = open.vault.write_text(&source, &rewritten) {
+                open.filter.record(&open.vault.abs(&source), hash);
+            }
+        }
+    }
+
     let mut idx = open.index.lock().unwrap();
     if let Err(e) = idx.rename_file(&open.vault, &from, &to) {
         tracing::warn!("index rename failed: {e}");
     }
     Ok(to)
+}
+
+#[tauri::command]
+pub fn note_duplicate(state: State<'_, AppState>, path: String) -> ApiResult<LoadedFile> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let (content, _) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    let dir = rel.parent().map(|p| p.as_str().to_string()).unwrap_or_default();
+    let ext = rel.extension().unwrap_or("md").to_string();
+    let copy_path = open
+        .vault
+        .unique_path(&dir, &format!("{} copy", rel.stem()), &ext)
+        .map_err(ApiError::from)?;
+    // A duplicated note must not share the original's stable id.
+    let content = if ext == "md" {
+        let mut doc = NoteDocument::parse(&content).map_err(ApiError::from)?;
+        if let Some(fm) = &mut doc.frontmatter {
+            if fm.id().is_some() {
+                fm.set_str(
+                    "id",
+                    &mica_core::RecordId::new(mica_core::IdKind::Note).to_string(),
+                );
+            }
+        }
+        doc.serialize().map_err(ApiError::from)?
+    } else {
+        content
+    };
+    let version = guarded_write(&open, &copy_path, &content, None)?;
+    Ok(LoadedFile {
+        path: copy_path,
+        content,
+        version,
+    })
+}
+
+/// Save a pasted/dropped asset into the configured assets folder.
+/// Returns the vault-relative path of the stored file.
+#[tauri::command]
+pub fn asset_save(
+    state: State<'_, AppState>,
+    name: String,
+    data_base64: String,
+) -> ApiResult<VaultPath> {
+    use base64::Engine;
+    let open = state.current().map_err(ApiError::from)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| ApiError {
+            code: "bad_asset".into(),
+            message: e.to_string(),
+            path: None,
+        })?;
+    let safe_name: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let (stem, ext) = match safe_name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), e.to_string()),
+        _ => (safe_name.clone(), "png".to_string()),
+    };
+    let dir = format!("{}/images", open.vault.config().assets_dir);
+    let path = open
+        .vault
+        .unique_path(&dir, &stem, &ext)
+        .map_err(ApiError::from)?;
+    let hash = open.vault.write_bytes(&path, &bytes).map_err(ApiError::from)?;
+    open.filter.record(&open.vault.abs(&path), hash);
+    Ok(path)
+}
+
+#[derive(Debug, Serialize)]
+pub struct BackupOutcome {
+    pub folder: String,
+    pub files: usize,
+}
+
+#[tauri::command]
+pub fn vault_backup(state: State<'_, AppState>) -> ApiResult<BackupOutcome> {
+    let open = state.current().map_err(ApiError::from)?;
+    let (folder, files) = open.vault.backup().map_err(ApiError::from)?;
+    Ok(BackupOutcome { folder, files })
+}
+
+#[tauri::command]
+pub fn vault_import_folder(
+    state: State<'_, AppState>,
+    src: String,
+    dest_dir: Option<String>,
+) -> ApiResult<usize> {
+    let open = state.current().map_err(ApiError::from)?;
+    let dest = dest_dir.unwrap_or_else(|| open.vault.config().notes_dir.clone());
+    let count = open
+        .vault
+        .import_folder(&PathBuf::from(&src), &dest)
+        .map_err(ApiError::from)?;
+    // Imported files are external writes; index them now.
+    if let Err(e) = open.index.lock().unwrap().sync(&open.vault) {
+        tracing::warn!("index sync after import failed: {e}");
+    }
+    Ok(count)
+}
+
+#[tauri::command]
+pub fn vault_export(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+    dest: String,
+) -> ApiResult<usize> {
+    let open = state.current().map_err(ApiError::from)?;
+    let vault_paths: Result<Vec<VaultPath>, _> =
+        paths.iter().map(|p| VaultPath::new(p)).collect();
+    let vault_paths = vault_paths.map_err(ApiError::from)?;
+    open.vault
+        .export_files(&vault_paths, &PathBuf::from(&dest))
+        .map_err(ApiError::from)
 }
 
 #[tauri::command]

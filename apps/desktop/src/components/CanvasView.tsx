@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, CanvasOp, CellKind, Scene, SceneCell, isApiError } from "../api";
 import { docEvents } from "../docEvents";
 import { useStore, kindOfPath, titleOfPath } from "../store";
+import { relativeTo } from "../editor/paths";
 
 type Tool =
   | "select"
@@ -24,33 +25,48 @@ const SHAPE_DEFAULT_SIZE: Record<string, { w: number; h: number }> = {
 };
 
 let cellCounter = 0;
-function newCellId(): string {
+function newCellId(prefix = "shape"): string {
   cellCounter += 1;
-  return `shape_${Date.now().toString(36)}${cellCounter.toString(36)}${Math.random()
+  return `${prefix}_${Date.now().toString(36)}${cellCounter.toString(36)}${Math.random()
     .toString(36)
     .slice(2, 8)}`;
+}
+
+interface Marquee {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
 }
 
 export default function CanvasView({ path, active }: { path: string; active: boolean }) {
   const [scene, setScene] = useState<Scene | null>(null);
   const [version, setVersion] = useState("");
   const [tool, setTool] = useState<Tool>("select");
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
   const [viewBox, setViewBox] = useState({ x: -100, y: -100, zoom: 1 });
   const [editingLabel, setEditingLabel] = useState<string | null>(null);
+  const [marquee, setMarquee] = useState<Marquee | null>(null);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const pathRef = useRef(path);
   pathRef.current = path;
   const versionRef = useRef(version);
   versionRef.current = version;
+  const sceneRef = useRef(scene);
+  sceneRef.current = scene;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+
   const dragState = useRef<{
-    mode: "move" | "pan" | "resize";
+    mode: "move" | "pan" | "resize" | "marquee";
     cellId?: string;
     startX: number;
     startY: number;
+    /** original geometry of every cell being dragged (multi-select + frame contents) */
+    origs?: Map<string, { x: number; y: number; width: number; height: number }>;
     orig?: { x: number; y: number; width: number; height: number };
     origView?: { x: number; y: number };
     moved?: boolean;
@@ -98,11 +114,12 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     [load],
   );
 
-  // Optimistic local update for smooth dragging; commit on mouse-up.
-  const updateLocal = (cell: SceneCell) => {
-    setScene((s) =>
-      s ? { ...s, cells: s.cells.map((c) => (c.id === cell.id ? cell : c)) } : s,
-    );
+  const updateLocal = (cells: SceneCell[]) => {
+    setScene((s) => {
+      if (!s) return s;
+      const byId = new Map(cells.map((c) => [c.id, c]));
+      return { ...s, cells: s.cells.map((c) => byId.get(c.id) ?? c) };
+    });
   };
 
   const toWorld = (clientX: number, clientY: number) => {
@@ -111,6 +128,32 @@ export default function CanvasView({ path, active }: { path: string; active: boo
       x: (clientX - rect.left) / viewBox.zoom + viewBox.x,
       y: (clientY - rect.top) / viewBox.zoom + viewBox.y,
     };
+  };
+
+  /** Cells that should move together with `cell`: itself, other selected
+   * cells, and — for frames — every cell geometrically inside the frame. */
+  const dragGroup = (cell: SceneCell): SceneCell[] => {
+    const s = sceneRef.current;
+    if (!s) return [cell];
+    const ids = new Set<string>(
+      selectedRef.current.has(cell.id) ? selectedRef.current : [cell.id],
+    );
+    for (const id of [...ids]) {
+      const c = s.cells.find((x) => x.id === id);
+      if (c?.kind === "frame" && c.geometry) {
+        const f = c.geometry;
+        for (const other of s.cells) {
+          if (other.id === c.id || !other.geometry || other.kind === "connector") continue;
+          const g = other.geometry;
+          const cx = g.x + g.width / 2;
+          const cy = g.y + g.height / 2;
+          if (cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height) {
+            ids.add(other.id);
+          }
+        }
+      }
+    }
+    return s.cells.filter((c) => ids.has(c.id) && c.geometry != null);
   };
 
   const onCanvasMouseDown = (e: React.MouseEvent) => {
@@ -126,19 +169,29 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     if (tool !== "select" && tool !== "connector") {
       const { x, y } = toWorld(e.clientX, e.clientY);
       const size = SHAPE_DEFAULT_SIZE[tool] ?? { w: 160, h: 80 };
-      const kind = tool as CellKind;
       const cell: SceneCell = {
         id: newCellId(),
-        kind,
+        kind: tool as CellKind,
         label: tool === "text" ? "Text" : tool === "sticky" ? "Note" : "",
-        geometry: { x: Math.round(x - size.w / 2), y: Math.round(y - size.h / 2), width: size.w, height: size.h },
+        geometry: {
+          x: Math.round(x - size.w / 2),
+          y: Math.round(y - size.h / 2),
+          width: size.w,
+          height: size.h,
+        },
       };
       void apply([{ op: "add_cell", cell }]);
       setTool("select");
-      setSelected(cell.id);
+      setSelected(new Set([cell.id]));
       return;
     }
-    setSelected(null);
+    if (tool === "select") {
+      // Start marquee selection on empty canvas.
+      const { x, y } = toWorld(e.clientX, e.clientY);
+      dragState.current = { mode: "marquee", startX: x, startY: y };
+      setMarquee({ x1: x, y1: y, x2: x, y2: y });
+    }
+    if (!e.shiftKey) setSelected(new Set());
     setConnectFrom(null);
   };
 
@@ -149,7 +202,7 @@ export default function CanvasView({ path, active }: { path: string; active: boo
         setConnectFrom(cell.id);
       } else if (connectFrom !== cell.id) {
         const edge: SceneCell = {
-          id: newCellId().replace("shape_", "edge_"),
+          id: newCellId("edge"),
           kind: "connector",
           label: "",
           source: connectFrom,
@@ -161,15 +214,24 @@ export default function CanvasView({ path, active }: { path: string; active: boo
       }
       return;
     }
-    setSelected(cell.id);
+    setSelected((prev) => {
+      if (e.shiftKey) {
+        const next = new Set(prev);
+        if (next.has(cell.id)) next.delete(cell.id);
+        else next.add(cell.id);
+        return next;
+      }
+      return prev.has(cell.id) ? prev : new Set([cell.id]);
+    });
     if (cell.geometry) {
       const { x, y } = toWorld(e.clientX, e.clientY);
+      // note: selection state updates async; compute group from refs on move
       dragState.current = {
         mode: "move",
         cellId: cell.id,
         startX: x,
         startY: y,
-        orig: { ...cell.geometry },
+        origs: undefined,
       };
     }
   };
@@ -199,34 +261,80 @@ export default function CanvasView({ path, active }: { path: string; active: boo
       }));
       return;
     }
-    const cell = scene.cells.find((c) => c.id === drag.cellId);
-    if (!cell || !drag.orig) return;
     const { x, y } = toWorld(e.clientX, e.clientY);
+    if (drag.mode === "marquee") {
+      setMarquee({ x1: drag.startX, y1: drag.startY, x2: x, y2: y });
+      return;
+    }
     const dx = x - drag.startX;
     const dy = y - drag.startY;
     if (drag.mode === "move") {
-      updateLocal({
-        ...cell,
-        geometry: { ...drag.orig, x: Math.round(drag.orig.x + dx), y: Math.round(drag.orig.y + dy) },
-      });
-    } else if (drag.mode === "resize") {
-      updateLocal({
-        ...cell,
-        geometry: {
-          ...drag.orig,
-          width: Math.max(24, Math.round(drag.orig.width + dx)),
-          height: Math.max(24, Math.round(drag.orig.height + dy)),
+      const anchor = scene.cells.find((c) => c.id === drag.cellId);
+      if (!anchor) return;
+      if (!drag.origs) {
+        drag.origs = new Map(
+          dragGroup(anchor).map((c) => [c.id, { ...c.geometry! }]),
+        );
+      }
+      const moved: SceneCell[] = [];
+      for (const [id, orig] of drag.origs) {
+        const c = scene.cells.find((x) => x.id === id);
+        if (!c) continue;
+        moved.push({
+          ...c,
+          geometry: { ...orig, x: Math.round(orig.x + dx), y: Math.round(orig.y + dy) },
+        });
+      }
+      updateLocal(moved);
+    } else if (drag.mode === "resize" && drag.orig) {
+      const cell = scene.cells.find((c) => c.id === drag.cellId);
+      if (!cell) return;
+      updateLocal([
+        {
+          ...cell,
+          geometry: {
+            ...drag.orig,
+            width: Math.max(24, Math.round(drag.orig.width + dx)),
+            height: Math.max(24, Math.round(drag.orig.height + dy)),
+          },
         },
-      });
+      ]);
     }
   };
 
   const onMouseUp = () => {
     const drag = dragState.current;
     dragState.current = null;
-    if (!drag || drag.mode === "pan" || !drag.moved || !scene) return;
-    const cell = scene.cells.find((c) => c.id === drag.cellId);
-    if (cell) void apply([{ op: "update_cell", cell }]);
+    if (!drag) return;
+    if (drag.mode === "marquee") {
+      const m = marquee;
+      setMarquee(null);
+      if (m && scene && (Math.abs(m.x2 - m.x1) > 4 || Math.abs(m.y2 - m.y1) > 4)) {
+        const [minX, maxX] = [Math.min(m.x1, m.x2), Math.max(m.x1, m.x2)];
+        const [minY, maxY] = [Math.min(m.y1, m.y2), Math.max(m.y1, m.y2)];
+        const hit = scene.cells
+          .filter((c) => c.geometry && c.kind !== "connector")
+          .filter((c) => {
+            const g = c.geometry!;
+            return g.x >= minX && g.x + g.width <= maxX && g.y >= minY && g.y + g.height <= maxY;
+          })
+          .map((c) => c.id);
+        if (hit.length) setSelected(new Set(hit));
+      }
+      return;
+    }
+    if (drag.mode === "pan" || !drag.moved || !scene) return;
+    if (drag.mode === "move" && drag.origs) {
+      const ops: CanvasOp[] = [];
+      for (const id of drag.origs.keys()) {
+        const cell = scene.cells.find((c) => c.id === id);
+        if (cell) ops.push({ op: "update_cell", cell });
+      }
+      if (ops.length) void apply(ops);
+    } else if (drag.mode === "resize" && drag.cellId) {
+      const cell = scene.cells.find((c) => c.id === drag.cellId);
+      if (cell) void apply([{ op: "update_cell", cell }]);
+    }
   };
 
   const onWheel = (e: React.WheelEvent) => {
@@ -234,7 +342,6 @@ export default function CanvasView({ path, active }: { path: string; active: boo
       const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
       setViewBox((v) => {
         const zoom = Math.min(4, Math.max(0.1, v.zoom * factor));
-        // Zoom around cursor.
         const rect = svgRef.current!.getBoundingClientRect();
         const cx = (e.clientX - rect.left) / v.zoom + v.x;
         const cy = (e.clientY - rect.top) / v.zoom + v.y;
@@ -249,9 +356,31 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     }
   };
 
+  const zoomToFit = () => {
+    if (!scene || !svgRef.current) return;
+    const boxes = scene.cells.filter((c) => c.geometry).map((c) => c.geometry!);
+    if (boxes.length === 0) {
+      setViewBox({ x: -100, y: -100, zoom: 1 });
+      return;
+    }
+    const minX = Math.min(...boxes.map((g) => g.x)) - 60;
+    const minY = Math.min(...boxes.map((g) => g.y)) - 60;
+    const maxX = Math.max(...boxes.map((g) => g.x + g.width)) + 60;
+    const maxY = Math.max(...boxes.map((g) => g.y + g.height)) + 60;
+    const rect = svgRef.current.getBoundingClientRect();
+    const zoom = Math.min(
+      4,
+      Math.max(0.1, Math.min(rect.width / (maxX - minX), rect.height / (maxY - minY))),
+    );
+    setViewBox({
+      zoom,
+      x: minX - (rect.width / zoom - (maxX - minX)) / 2,
+      y: minY - (rect.height / zoom - (maxY - minY)) / 2,
+    });
+  };
+
   const onCellDoubleClick = (cell: SceneCell) => {
     if ((cell.kind === "note_link" || cell.kind === "database_link") && cell.href) {
-      // href is relative to the canvas file.
       const parts = pathRef.current.split("/").slice(0, -1);
       for (const seg of cell.href.split("/")) {
         if (seg === "..") parts.pop();
@@ -268,64 +397,93 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   };
 
   const deleteSelected = useCallback(() => {
-    if (selected) {
-      void apply([{ op: "remove_cell", id: selected }]);
-      setSelected(null);
+    const ids = [...selectedRef.current];
+    if (ids.length) {
+      void apply(ids.map((id) => ({ op: "remove_cell", id }) as CanvasOp));
+      setSelected(new Set());
     }
-  }, [selected, apply]);
+  }, [apply]);
+
+  const duplicateSelected = useCallback(() => {
+    const s = sceneRef.current;
+    if (!s) return;
+    const ops: CanvasOp[] = [];
+    const newIds: string[] = [];
+    for (const id of selectedRef.current) {
+      const cell = s.cells.find((c) => c.id === id);
+      if (!cell || cell.kind === "connector") continue;
+      const copy: SceneCell = {
+        ...cell,
+        id: newCellId(),
+        geometry: cell.geometry
+          ? { ...cell.geometry, x: cell.geometry.x + 24, y: cell.geometry.y + 24 }
+          : undefined,
+      };
+      newIds.push(copy.id);
+      ops.push({ op: "add_cell", cell: copy });
+    }
+    if (ops.length) {
+      void apply(ops).then(() => setSelected(new Set(newIds)));
+    }
+  }, [apply]);
+
+  const reorderSelected = useCallback(
+    (toFront: boolean) => {
+      const s = sceneRef.current;
+      if (!s) return;
+      const ops: CanvasOp[] = [];
+      for (const id of selectedRef.current) {
+        ops.push({ op: "reorder_cell", id, to_index: toFront ? s.cells.length : 0 });
+      }
+      if (ops.length) void apply(ops);
+    },
+    [apply],
+  );
 
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
-      if ((e.key === "Delete" || e.key === "Backspace") && selected && !editingLabel) {
-        const el = document.activeElement;
-        if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+      const el = document.activeElement;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.getAttribute("contenteditable"))) {
+        return;
+      }
+      if ((e.key === "Delete" || e.key === "Backspace") && selectedRef.current.size && !editingLabel) {
         deleteSelected();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "d") {
+        e.preventDefault();
+        duplicateSelected();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "0") {
+        e.preventDefault();
+        setViewBox({ x: -100, y: -100, zoom: 1 });
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "1") {
+        e.preventDefault();
+        zoomToFit();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+        e.preventDefault();
+        const s = sceneRef.current;
+        if (s) setSelected(new Set(s.cells.filter((c) => c.kind !== "connector").map((c) => c.id)));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, selected, editingLabel, deleteSelected]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, editingLabel, deleteSelected, duplicateSelected]);
 
-  // Drop a note/database from a quick prompt (MVP: toolbar button).
-  const addLink = async (kind: "note_link" | "database_link") => {
-    const q = prompt(kind === "note_link" ? "Note title to link" : "Database title to link");
-    if (!q) return;
-    const hits = await api.quickSwitch(q, 5);
-    const hit = hits.find((h) =>
-      kind === "note_link" ? h.kind === "note" : h.kind === "database",
-    );
-    if (!hit) {
-      alert("Not found");
-      return;
-    }
-    // Compute path relative to the canvas file.
-    const fromParts = pathRef.current.split("/").slice(0, -1);
-    const toParts = hit.path.split("/");
-    let common = 0;
-    while (
-      common < fromParts.length &&
-      common < toParts.length - 1 &&
-      fromParts[common] === toParts[common]
-    )
-      common++;
-    const rel = [
-      ...Array(fromParts.length - common).fill(".."),
-      ...toParts.slice(common),
-    ].join("/");
-
+  // Drop a note/database dragged from the sidebar → link cell.
+  const onDrop = (e: React.DragEvent) => {
+    const dropped = e.dataTransfer.getData("application/x-mica-path");
+    if (!dropped) return;
+    e.preventDefault();
+    const kind = kindOfPath(dropped);
+    if (kind !== "note" && kind !== "database") return;
+    const { x, y } = toWorld(e.clientX, e.clientY);
     const cell: SceneCell = {
       id: newCellId(),
-      kind,
-      label: hit.title,
-      href: rel,
-      view: kind === "database_link" ? "table_default" : undefined,
-      geometry: {
-        x: Math.round(viewBox.x + 200),
-        y: Math.round(viewBox.y + 160),
-        width: 200,
-        height: 90,
-      },
+      kind: kind === "note" ? "note_link" : "database_link",
+      label: titleOfPath(dropped),
+      href: relativeTo(pathRef.current, dropped),
+      view: kind === "database" ? "table_default" : undefined,
+      geometry: { x: Math.round(x - 100), y: Math.round(y - 45), width: 200, height: 90 },
     };
     void apply([{ op: "add_cell", cell }]);
   };
@@ -335,7 +493,7 @@ export default function CanvasView({ path, active }: { path: string; active: boo
 
   const vertices = scene.cells.filter((c) => c.kind !== "connector");
   const edges = scene.cells.filter((c) => c.kind === "connector");
-  const selectedCell = scene.cells.find((c) => c.id === selected);
+  const selectionCount = selected.size;
 
   const TOOLS: { id: Tool; label: string }[] = [
     { id: "select", label: "Select" },
@@ -365,14 +523,19 @@ export default function CanvasView({ path, active }: { path: string; active: boo
           </button>
         ))}
         <div className="spacer" />
-        <button onClick={() => addLink("note_link")}>+ Note link</button>
-        <button onClick={() => addLink("database_link")}>+ DB link</button>
+        <button onClick={zoomToFit} title="Zoom to fit (Ctrl+1)">
+          Fit
+        </button>
+        <button
+          onClick={() => setViewBox({ x: -100, y: -100, zoom: 1 })}
+          title="Reset zoom (Ctrl+0)"
+        >
+          100%
+        </button>
         <span className="muted small">{Math.round(viewBox.zoom * 100)}%</span>
       </div>
       {error && <div className="banner warning">{error}</div>}
-      {connectFrom && (
-        <div className="banner info">Click a second shape to connect.</div>
-      )}
+      {connectFrom && <div className="banner info">Click a second shape to connect.</div>}
       <svg
         ref={svgRef}
         className={`canvas-svg tool-${tool}`}
@@ -381,6 +544,10 @@ export default function CanvasView({ path, active }: { path: string; active: boo
         onMouseUp={onMouseUp}
         onMouseLeave={onMouseUp}
         onWheel={onWheel}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes("application/x-mica-path")) e.preventDefault();
+        }}
+        onDrop={onDrop}
       >
         <defs>
           <marker
@@ -395,23 +562,24 @@ export default function CanvasView({ path, active }: { path: string; active: boo
             <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--edge-color)" />
           </marker>
         </defs>
-        <g
-          transform={`scale(${viewBox.zoom}) translate(${-viewBox.x}, ${-viewBox.y})`}
-        >
+        <g transform={`scale(${viewBox.zoom}) translate(${-viewBox.x}, ${-viewBox.y})`}>
           {edges.map((edge) => (
             <EdgeShape
               key={edge.id}
               edge={edge}
               cells={vertices}
-              selected={selected === edge.id}
-              onMouseDown={(e) => onCellMouseDown(e, edge)}
+              selected={selected.has(edge.id)}
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                setSelected(new Set([edge.id]));
+              }}
             />
           ))}
           {vertices.map((cell) => (
             <VertexShape
               key={cell.id}
               cell={cell}
-              selected={selected === cell.id}
+              selected={selected.has(cell.id)}
               connectCandidate={tool === "connector"}
               connectFrom={connectFrom === cell.id}
               editing={editingLabel === cell.id}
@@ -420,15 +588,38 @@ export default function CanvasView({ path, active }: { path: string; active: boo
               onResizeMouseDown={(e) => onResizeMouseDown(e, cell)}
               onLabelCommit={(label) => {
                 setEditingLabel(null);
-                if (label !== cell.label) void apply([{ op: "update_cell", cell: { ...cell, label } }]);
+                if (label !== cell.label)
+                  void apply([{ op: "update_cell", cell: { ...cell, label } }]);
               }}
             />
           ))}
+          {marquee && (
+            <rect
+              className="marquee"
+              x={Math.min(marquee.x1, marquee.x2)}
+              y={Math.min(marquee.y1, marquee.y2)}
+              width={Math.abs(marquee.x2 - marquee.x1)}
+              height={Math.abs(marquee.y2 - marquee.y1)}
+            />
+          )}
         </g>
       </svg>
-      {selectedCell && (
+      {selectionCount > 0 && (
         <div className="canvas-inspector">
-          <span className="muted small">{selectedCell.kind}</span>
+          <span className="muted small">
+            {selectionCount === 1
+              ? scene.cells.find((c) => selected.has(c.id))?.kind
+              : `${selectionCount} selected`}
+          </span>
+          <button className="small" onClick={() => reorderSelected(true)} title="Bring to front">
+            ⬆ Front
+          </button>
+          <button className="small" onClick={() => reorderSelected(false)} title="Send to back">
+            ⬇ Back
+          </button>
+          <button className="small" onClick={duplicateSelected} title="Duplicate (Ctrl+D)">
+            ⧉
+          </button>
           <button className="small danger" onClick={deleteSelected}>
             Delete
           </button>
@@ -484,7 +675,9 @@ function VertexShape({
       shape = <rect x={g.x} y={g.y} width={g.width} height={g.height} rx={2} />;
       break;
     default:
-      shape = <rect x={g.x} y={g.y} width={g.width} height={g.height} rx={cell.kind === "sticky" ? 2 : 8} />;
+      shape = (
+        <rect x={g.x} y={g.y} width={g.width} height={g.height} rx={cell.kind === "sticky" ? 2 : 8} />
+      );
   }
 
   return (
@@ -559,13 +752,12 @@ function EdgeShape({
   const y1 = s.y + s.height / 2;
   const x2 = t.x + t.width / 2;
   const y2 = t.y + t.height / 2;
-  // Trim ends at the bounding boxes so the arrowhead is visible.
   const trim = (
     fx: number,
     fy: number,
     tx: number,
     ty: number,
-    box: { x: number; y: number; width: number; height: number },
+    box: { width: number; height: number },
   ) => {
     const dx = tx - fx;
     const dy = ty - fy;
@@ -584,10 +776,7 @@ function EdgeShape({
   );
 }
 
-/**
- * Minimal client-side reader for the deterministic XML our own core emits —
- * enough to render; the core remains the only writer.
- */
+/** Minimal client-side reader for the deterministic XML our core emits. */
 function parseSceneFromXml(xml: string): Scene {
   const doc = new DOMParser().parseFromString(xml, "text/xml");
   const diagram = doc.querySelector("diagram");

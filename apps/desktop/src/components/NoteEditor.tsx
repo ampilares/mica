@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { EditorContent, useEditor, Editor, Extension } from "@tiptap/react";
+import { EditorContent, useEditor, Editor, Extension, BubbleMenu } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import Link from "@tiptap/extension-link";
 import Image from "@tiptap/extension-image";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import Placeholder from "@tiptap/extension-placeholder";
 import Suggestion from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
@@ -15,8 +16,31 @@ import { splitFrontmatter, restoreWikiLinks } from "../markdown";
 import { docEvents } from "../docEvents";
 import { WikiLinkHighlight } from "../editor/wikiLinks";
 import SuggestionPopup, { PopupState, PopupItem } from "../editor/SuggestionPopup";
-import { relativeTo } from "../editor/paths";
+import { relativeTo, resolveRelative } from "../editor/paths";
 import DatabaseCodeBlock from "../editor/DatabaseCodeBlock";
+
+/**
+ * Image node that keeps a vault-relative `src` in the document (canonical
+ * Markdown) but displays through the Tauri asset protocol.
+ */
+function VaultImage(notePath: string, vaultRoot: string) {
+  return Image.extend({
+    addNodeView() {
+      return ({ node }) => {
+        const img = document.createElement("img");
+        const src = node.attrs.src as string;
+        if (src && !src.includes("://")) {
+          const abs = `${vaultRoot}/${resolveRelative(notePath, src)}`;
+          img.src = convertFileSrc(abs);
+        } else {
+          img.src = src;
+        }
+        if (node.attrs.alt) img.alt = node.attrs.alt;
+        return { dom: img };
+      };
+    },
+  });
+}
 
 interface SlashItem extends PopupItem {
   run: (editor: Editor, range: { from: number; to: number }) => void;
@@ -41,6 +65,7 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
   const setConflict = useStore((s) => s.setConflict);
   const openTab = useStore((s) => s.openTab);
   const refreshTree = useStore((s) => s.refreshTree);
+  const vaultRoot = useStore((s) => s.vault?.root ?? "");
 
   const [popup, setPopup] = useState<PopupState | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -64,7 +89,7 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
       TaskList,
       TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false }),
-      Image,
+      VaultImage(path, vaultRoot.replace(/\\/g, "/")),
       Placeholder.configure({ placeholder: "Write, or type / for blocks…" }),
       Markdown.configure({
         html: false,
@@ -166,6 +191,31 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
     ],
     editorProps: {
       attributes: { class: "note-editor-content" },
+      handlePaste: (view, event) => {
+        const files = event.clipboardData?.files;
+        if (files && files.length > 0) {
+          const image = Array.from(files).find((f) => f.type.startsWith("image/"));
+          if (image) {
+            event.preventDefault();
+            void (async () => {
+              const buf = await image.arrayBuffer();
+              let binary = "";
+              const bytes = new Uint8Array(buf);
+              for (let i = 0; i < bytes.length; i += 0x8000) {
+                binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+              }
+              const name = image.name || `pasted-${Date.now()}.png`;
+              const assetPath = await api.assetSave(name, btoa(binary));
+              const rel = relativeTo(pathRef.current, assetPath);
+              const { schema } = view.state;
+              const node = schema.nodes.image.create({ src: rel, alt: name });
+              view.dispatch(view.state.tr.replaceSelectionWith(node));
+            })();
+            return true;
+          }
+        }
+        return false;
+      },
       handleClick: (view, _pos, event) => {
         const target = (event.target as HTMLElement).closest?.(".wiki-link");
         if (target && (event.ctrlKey || event.metaKey || event.detail === 1)) {
@@ -324,6 +374,49 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
         </div>
       )}
       <div className="note-title">{titleOfPath(path)}</div>
+      {editor && (
+        <BubbleMenu editor={editor} tippyOptions={{ duration: 100 }}>
+          <div className="bubble-menu">
+            <button
+              className={editor.isActive("bold") ? "active" : ""}
+              onClick={() => editor.chain().focus().toggleBold().run()}
+            >
+              B
+            </button>
+            <button
+              className={editor.isActive("italic") ? "active" : ""}
+              onClick={() => editor.chain().focus().toggleItalic().run()}
+            >
+              <i>I</i>
+            </button>
+            <button
+              className={editor.isActive("strike") ? "active" : ""}
+              onClick={() => editor.chain().focus().toggleStrike().run()}
+            >
+              <s>S</s>
+            </button>
+            <button
+              className={editor.isActive("code") ? "active" : ""}
+              onClick={() => editor.chain().focus().toggleCode().run()}
+            >
+              {"</>"}
+            </button>
+            <button
+              className={editor.isActive("link") ? "active" : ""}
+              onClick={() => {
+                if (editor.isActive("link")) {
+                  editor.chain().focus().unsetLink().run();
+                } else {
+                  const url = prompt("Link URL", "https://");
+                  if (url) editor.chain().focus().setLink({ href: url }).run();
+                }
+              }}
+            >
+              🔗
+            </button>
+          </div>
+        </BubbleMenu>
+      )}
       <EditorContent editor={editor} className="editor-scroll" />
       {!loaded && <div className="muted small loading-note">Loading…</div>}
       <SuggestionPopup state={popup} />

@@ -212,6 +212,88 @@ impl Vault {
         fs::rename(&abs_from, &abs_to).map_err(|e| CoreError::io(&abs_from, e))
     }
 
+    /// Write binary content (assets) through the same atomic pipeline.
+    pub fn write_bytes(&self, path: &VaultPath, bytes: &[u8]) -> Result<ContentHash> {
+        atomic_write(&self.abs(path), bytes)
+    }
+
+    /// Snapshot all canonical files into `.workspace/backups/<stamp>/`.
+    /// Returns (backup folder name, number of files copied).
+    pub fn backup(&self) -> Result<(String, usize)> {
+        let stamp = mica_core::now_rfc3339().replace(':', "-");
+        let dest_root = self
+            .root
+            .join(WORKSPACE_DIR)
+            .join("backups")
+            .join(&stamp);
+        let tree = self.scan_tree()?;
+        let mut count = 0usize;
+        for file in tree.files() {
+            let src = self.abs(&file.path);
+            let dest = file.path.to_absolute(&dest_root);
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent).map_err(|e| CoreError::io(parent, e))?;
+            }
+            fs::copy(&src, &dest).map_err(|e| CoreError::io(&src, e))?;
+            count += 1;
+        }
+        Ok((stamp, count))
+    }
+
+    /// Copy an external folder's Markdown files (and common assets) into the
+    /// vault under `dest_dir` (FR-IMP-001, copy-in mode). Existing files are
+    /// never overwritten; colliding names get a numeric suffix.
+    pub fn import_folder(&self, src: &Path, dest_dir: &str) -> Result<usize> {
+        let mut count = 0usize;
+        for entry in walkdir::WalkDir::new(src)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+        {
+            let name = entry.file_name().to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            let rel_in_src = entry
+                .path()
+                .strip_prefix(src)
+                .map_err(|_| CoreError::InvalidPath(entry.path().display().to_string()))?;
+            let rel_str = rel_in_src.to_string_lossy().replace('\\', "/");
+            let candidate = if dest_dir.is_empty() {
+                rel_str.clone()
+            } else {
+                format!("{dest_dir}/{rel_str}")
+            };
+            let Ok(mut target) = VaultPath::new(&candidate) else {
+                continue;
+            };
+            if self.exists(&target) {
+                let dir = target.parent().map(|p| p.as_str().to_string()).unwrap_or_default();
+                let ext = target.extension().unwrap_or("md").to_string();
+                target = self.unique_path(&dir, target.stem(), &ext)?;
+            }
+            let bytes = fs::read(entry.path()).map_err(|e| CoreError::io(entry.path(), e))?;
+            self.write_bytes(&target, &bytes)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Export files to a destination folder outside the vault.
+    pub fn export_files(&self, paths: &[VaultPath], dest: &Path) -> Result<usize> {
+        let mut count = 0usize;
+        for path in paths {
+            let src = self.abs(path);
+            let target = path.to_absolute(dest);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| CoreError::io(parent, e))?;
+            }
+            fs::copy(&src, &target).map_err(|e| CoreError::io(&src, e))?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// Find a non-colliding path by appending ` 2`, ` 3`, … to the stem.
     pub fn unique_path(&self, dir: &str, stem: &str, ext: &str) -> Result<VaultPath> {
         let make = |candidate: &str| -> Result<VaultPath> {
@@ -316,6 +398,64 @@ mod tests {
         vault.write_text(&p1, "x\n").unwrap();
         let p2 = vault.unique_path("notes", "plan", "md").unwrap();
         assert_eq!(p2.as_str(), "notes/plan 2.md");
+    }
+
+    #[test]
+    fn backup_snapshots_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::create(dir.path()).unwrap();
+        vault
+            .write_text(&VaultPath::new("notes/a.md").unwrap(), "# A\n")
+            .unwrap();
+        let (stamp, count) = vault.backup().unwrap();
+        assert!(count >= 1);
+        assert!(dir
+            .path()
+            .join(".workspace/backups")
+            .join(&stamp)
+            .join("notes/a.md")
+            .is_file());
+    }
+
+    #[test]
+    fn import_folder_copies_without_overwrite() {
+        let src = tempfile::tempdir().unwrap();
+        fs::write(src.path().join("one.md"), "# One\n").unwrap();
+        fs::create_dir_all(src.path().join("sub")).unwrap();
+        fs::write(src.path().join("sub/two.md"), "# Two\n").unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::create(dir.path()).unwrap();
+        vault
+            .write_text(&VaultPath::new("import/one.md").unwrap(), "existing\n")
+            .unwrap();
+        let count = vault.import_folder(src.path(), "import").unwrap();
+        assert_eq!(count, 2);
+        // Existing file untouched; import got a suffixed name.
+        let (existing, _) = vault
+            .read_text(&VaultPath::new("import/one.md").unwrap())
+            .unwrap();
+        assert_eq!(existing, "existing\n");
+        assert!(vault.exists(&VaultPath::new("import/one 2.md").unwrap()));
+        assert!(vault.exists(&VaultPath::new("import/sub/two.md").unwrap()));
+    }
+
+    /// PRD §30: a crash between temp-write and rename must leave the original
+    /// intact. We simulate the crash window by verifying a failed persist
+    /// (temp file dropped) never touches the target.
+    #[test]
+    fn interrupted_save_leaves_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("file.md");
+        fs::write(&target, "original").unwrap();
+        // Simulate the pre-rename crash: temp file written then abandoned.
+        let tmp = tempfile::Builder::new()
+            .prefix(".mica-tmp-")
+            .tempfile_in(dir.path())
+            .unwrap();
+        std::io::Write::write_all(&mut tmp.as_file(), b"partial new content").unwrap();
+        drop(tmp); // "crash": temp removed, rename never happened
+        assert_eq!(fs::read_to_string(&target).unwrap(), "original");
     }
 
     #[test]

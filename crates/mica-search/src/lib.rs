@@ -170,6 +170,86 @@ impl SearchIndex {
         Ok(count)
     }
 
+    /// Warm start (NFR-PERF-001): reconcile the persisted index against the
+    /// current tree by (mtime, size) instead of re-parsing everything.
+    /// Falls back to indexing only new/changed files; removes vanished rows.
+    pub fn sync(&mut self, vault: &Vault) -> Result<usize> {
+        let tree = vault.scan_tree()?;
+        let disk: Vec<(VaultPath, FileKind, i64, i64)> = tree
+            .files()
+            .iter()
+            .filter_map(|f| {
+                let meta = std::fs::metadata(vault.abs(&f.path)).ok()?;
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                Some((
+                    f.path.clone(),
+                    f.kind.unwrap_or(FileKind::Other),
+                    mtime,
+                    meta.len() as i64,
+                ))
+            })
+            .collect();
+
+        let indexed: std::collections::HashMap<String, (i64, i64)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT path, mtime, size FROM files")
+                .map_err(|e| CoreError::Index(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)))
+                })
+                .map_err(|e| CoreError::Index(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+            rows
+        };
+
+        let disk_paths: std::collections::HashSet<&str> =
+            disk.iter().map(|(p, ..)| p.as_str()).collect();
+
+        let mut changed = 0usize;
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(|e| CoreError::Index(e.to_string()))?;
+        // Remove rows for files that no longer exist.
+        for path in indexed.keys() {
+            if !disk_paths.contains(path.as_str()) {
+                if let Ok(vp) = VaultPath::new(path) {
+                    remove_one(&tx, &vp)?;
+                    changed += 1;
+                }
+            }
+        }
+        // (Re-)index new or modified files.
+        for (path, kind, mtime, size) in &disk {
+            let unchanged = indexed
+                .get(path.as_str())
+                .map(|(m, s)| m == mtime && s == size)
+                .unwrap_or(false);
+            if unchanged {
+                continue;
+            }
+            remove_one(&tx, path)?;
+            if let Err(e) = index_one(&tx, vault, path, *kind) {
+                tracing::warn!("index skip {path}: {e}");
+                continue;
+            }
+            changed += 1;
+        }
+        tx.commit().map_err(|e| CoreError::Index(e.to_string()))?;
+        if changed > 0 {
+            self.resolve_links()?;
+        }
+        Ok(changed)
+    }
+
     /// Index or re-index one file after a save or external change.
     pub fn update_file(&mut self, vault: &Vault, path: &VaultPath) -> Result<()> {
         let kind = FileKind::from_path(path);
