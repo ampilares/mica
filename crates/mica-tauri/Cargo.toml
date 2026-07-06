@@ -1,0 +1,27 @@
+[package]
+name = "mica-tauri"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Mica — local-first, file-native notes workspace"
+default-run = "mica-tauri"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+mica-core = { workspace = true }
+mica-vault = { workspace = true }
+mica-markdown = { workspace = true }
+mica-db = { workspace = true }
+mica-drawio = { workspace = true }
+mica-search = { workspace = true }
+mica-watch = { workspace = true }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"

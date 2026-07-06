@@ -1,0 +1,18 @@
+[package]
+name = "mica-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mica-core = { workspace = true }
+mica-markdown = { workspace = true }
+mica-vault = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

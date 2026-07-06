@@ -1,0 +1,13 @@
+[package]
+name = "mica-markdown"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mica-core = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+pulldown-cmark = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }

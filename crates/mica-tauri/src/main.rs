@@ -1,0 +1,49 @@
+// Prevents an extra console window on Windows in release builds.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod commands;
+mod error;
+mod state;
+
+use state::AppState;
+
+fn main() {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            commands::ping,
+            commands::vault_create,
+            commands::vault_open,
+            commands::vault_close,
+            commands::vault_tree,
+            commands::vault_reveal,
+            commands::vault_open_external,
+            commands::note_create,
+            commands::note_load,
+            commands::note_save,
+            commands::note_rename,
+            commands::note_delete,
+            commands::conflict_resolve,
+            commands::db_create,
+            commands::db_load,
+            commands::db_apply,
+            commands::db_query,
+            commands::canvas_create,
+            commands::canvas_load,
+            commands::canvas_apply,
+            commands::search_query,
+            commands::quick_switch,
+            commands::links_backlinks,
+            commands::tags_list,
+            commands::resolve_wiki,
+            commands::index_rebuild,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Mica");
+}
