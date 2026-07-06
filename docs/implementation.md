@@ -245,9 +245,10 @@ Phases 3 and 4 have no dependency on each other and can overlap if there is more
 5. **Search over DB rows and canvas labels** (FR-SRCH-002) if not pulled into Phase 3.
 6. **Graph / link-explorer panel** (FR-SRCH-006).
 7. **Canvas exports** PNG/SVG/PDF (FR-EXP-003 / FR-CAN-006) and **draw.io import hardening** (FR-IMP-003 / FR-CAN-007).
-8. **Canvas frames navigation** (FR-CAN-008).
-9. **Block-reference embeds** building on inline block IDs (FR-NOTE-010 completion).
-10. **Performance tuning for very large vaults** (25k+ notes) from beta telemetry-free feedback.
+8. **Canvas format interop:** Obsidian Canvas (`.canvas`) and Excalidraw (`.excalidraw`) import/export per spec §4.4.1 — import creates a `.drawio`-backed canvas; exports are one-shot and documented-lossy.
+9. **Canvas frames navigation** (FR-CAN-008).
+10. **Block-reference embeds** building on inline block IDs (FR-NOTE-010 completion).
+11. **Performance tuning for very large vaults** (25k+ notes) from beta telemetry-free feedback.
 
 **Exit criteria:** P1 requirement list closed or consciously deferred; public beta shipped.
 
@@ -261,7 +262,7 @@ From PRD Phases 3–4 and post-MVP scope, in rough order:
 - Presentation mode from canvas frames (FR-CAN-009).
 - Git integration (commit/diff/pull/push in-app) — decision point per PRD open question 7.
 - Plugin API design + sandbox model (NFR-SEC-005 gate before any third-party plugins).
-- AFFiNE and Obsidian-Canvas import/export exploration.
+- AFFiNE import/export exploration (Obsidian Canvas and Excalidraw moved into Phase 6).
 - Sharded database row format for very large databases (migration path per spec §16).
 - **1.0 hardening:** stable file-format guarantee + published format docs, migration tools, external security review, full accessibility audit, signed auto-update.
 - Later horizons per PRD: mobile companion, encrypted/P2P sync, real-time collaboration (CRDT sidecar model, PRD §15.2), AI features.

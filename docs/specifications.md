@@ -38,6 +38,7 @@ These decisions resolve the PRD's open questions (§25) and lock the initial bui
 | D8 | Database file layout | **Single-file `.database.json`** for MVP; schema designed to migrate to sharded rows | Per PRD §26.5 |
 | D9 | Collaboration | **No CRDT / real-time collaboration in MVP** | File-level conflict handling only (PRD §15.1) |
 | D10 | draw.io interop level | **"Opens visually"** in draw.io; full round-trip is best-effort, not guaranteed | App-specific embeds degrade to labeled placeholder shapes |
+| D11 | Secondary canvas formats | **Obsidian Canvas (`.canvas`) and Excalidraw (`.excalidraw`) import/export**, post-MVP | Widens interop with both ecosystems (resolves PRD open question #6); `.drawio` remains the only canonical on-disk format |
 
 ---
 
@@ -267,6 +268,36 @@ Canonical extension: `.drawio`, **uncompressed XML** (FR-CAN-005). Structure per
 - The parser validates XML before any save; an invalid existing file is never overwritten — the app surfaces the error and keeps the prior valid version (backup) (PRD §30).
 - Foreign `.drawio` files: supported shapes render; unsupported styles render as gray placeholder boxes with labels; unknown cells/attributes are preserved on save (FR-CAN-007, P1).
 
+#### 4.4.1 Secondary canvas formats (D11, post-MVP)
+
+`.drawio` is the only canonical format the app saves continuously. Obsidian Canvas and Excalidraw are **import/export interchange formats**: importing creates a new `.drawio`-backed canvas; exporting produces a one-shot file. Both conversions are documented-lossy — the export dialog lists what will degrade.
+
+**Obsidian Canvas (`.canvas` JSON):**
+
+| Obsidian Canvas | Mica scene | Notes |
+|---|---|---|
+| `text` node | Sticky note | Markdown body preserved as label text |
+| `file` node (`.md`) | Note-link cell | Path re-resolved relative to vault |
+| `file` node (image) | Image cell | |
+| `link` node | Text cell with URL | |
+| `group` | Frame | |
+| `edge` | Connector | Endpoints, labels, colors mapped approximately |
+
+Export caveat: Obsidian Canvas has no shape primitives — rectangles/ellipses/diamonds export as colored text cards; database-link cells export as text cards with the relative path.
+
+**Excalidraw (`.excalidraw` JSON):**
+
+| Excalidraw | Mica scene | Notes |
+|---|---|---|
+| `rectangle` / `ellipse` / `diamond` | Same shapes | Fill/stroke mapped; roughness dropped |
+| `text` | Text cell | |
+| `arrow` / `line` | Connector | Bindings → endpoint attachments |
+| `frame` | Frame | |
+| `image` | Image cell | Embedded base64 files extracted to `assets/` |
+| `freedraw` | Placeholder cell | No freehand primitive in MVP scene model; import warns and preserves bounding-box placeholder |
+
+Export caveat: sticky notes export as filled rectangles with text; note/database link cells export as labeled rectangles (`link` attribute set to the relative path).
+
 ### 4.5 Assets
 
 - Default destination `assets/` (configurable, FR-SET-002); pasted/dragged images are copied in and referenced by relative path.
@@ -289,8 +320,8 @@ crates/
   mica-search/     # SQLite index: FTS5, links, tags, rows; rebuild pipeline
   mica-watch/      # notify-based watcher, debouncer, event classification, self-write filter
   mica-assets/     # attachment ingest, thumbnails
-  mica-import/     # Markdown folder import; CSV import (P1); drawio import (P1)
-  mica-export/     # Markdown/JSON/CSV export; canvas PNG/SVG/PDF export (P1)
+  mica-import/     # Markdown folder import; CSV import (P1); drawio import (P1); Obsidian Canvas + Excalidraw import (P2)
+  mica-export/     # Markdown/JSON/CSV export; canvas PNG/SVG/PDF export (P1); Obsidian Canvas + Excalidraw export (P2)
   mica-tauri/      # Tauri command bindings, event bridge, app state
 ```
 
@@ -487,6 +518,8 @@ Frontend sends batched scene ops (`add/update/remove cells`) with `base_version`
 | Export database JSON/CSV (FR-EXP-002) | P1 | CSV flattens cells; JSON is the canonical file |
 | Import `.drawio` (FR-IMP-003) | P1 | Supported shapes render; unknown preserved |
 | Export canvas PNG/SVG/PDF (FR-EXP-003) | P1 | SVG from renderer; PNG/PDF via rasterization |
+| Import/export Obsidian Canvas `.canvas` | P2 | Mapping per §4.4.1; import creates a `.drawio` canvas |
+| Import/export Excalidraw `.excalidraw` | P2 | Mapping per §4.4.1; freehand degrades on import |
 
 ---
 
