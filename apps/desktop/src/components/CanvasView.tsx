@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, CanvasOp, CellKind, Scene, SceneCell, isApiError } from "../api";
 import { docEvents } from "../docEvents";
 import { useStore, kindOfPath, titleOfPath } from "../store";
@@ -37,6 +38,67 @@ interface Marquee {
   y1: number;
   x2: number;
   y2: number;
+}
+
+/** Frame list for quick navigation (FR-CAN-008). */
+function FramesMenu({
+  frames,
+  onJump,
+}: {
+  frames: SceneCell[];
+  onJump: (g: { x: number; y: number; width: number; height: number }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (frames.length === 0) return null;
+  return (
+    <span className="menu-anchor">
+      <button className="small" onClick={() => setOpen(!open)}>
+        Frames ({frames.length}) ▾
+      </button>
+      {open && (
+        <div className="dropdown" onMouseLeave={() => setOpen(false)}>
+          {frames.map((f, i) => (
+            <button
+              key={f.id}
+              onClick={() => {
+                setOpen(false);
+                onJump(f.geometry!);
+              }}
+            >
+              {f.label || `Frame ${i + 1}`}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function ExportMenu({
+  onExport,
+}: {
+  onExport: (format: "svg" | "png" | "obsidian" | "excalidraw") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const pick = (f: "svg" | "png" | "obsidian" | "excalidraw") => {
+    setOpen(false);
+    onExport(f);
+  };
+  return (
+    <span className="menu-anchor">
+      <button className="small" onClick={() => setOpen(!open)}>
+        Export ▾
+      </button>
+      {open && (
+        <div className="dropdown" onMouseLeave={() => setOpen(false)}>
+          <button onClick={() => pick("png")}>PNG image…</button>
+          <button onClick={() => pick("svg")}>SVG image…</button>
+          <button onClick={() => pick("obsidian")}>Obsidian Canvas…</button>
+          <button onClick={() => pick("excalidraw")}>Excalidraw…</button>
+        </div>
+      )}
+    </span>
+  );
 }
 
 export default function CanvasView({ path, active }: { path: string; active: boolean }) {
@@ -379,6 +441,122 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     });
   };
 
+  /** Zoom the viewport to one frame's bounds (FR-CAN-008). */
+  const zoomToRect = (g: { x: number; y: number; width: number; height: number }) => {
+    if (!svgRef.current) return;
+    const pad = 40;
+    const rect = svgRef.current.getBoundingClientRect();
+    const zoom = Math.min(
+      4,
+      Math.max(0.1, Math.min(rect.width / (g.width + pad * 2), rect.height / (g.height + pad * 2))),
+    );
+    setViewBox({
+      zoom,
+      x: g.x - (rect.width / zoom - g.width) / 2,
+      y: g.y - (rect.height / zoom - g.height) / 2,
+    });
+  };
+
+  /** Standalone SVG of the current scene: DOM clone + inlined styles. */
+  const buildExportSvg = (): string | null => {
+    const src = svgRef.current;
+    const s = sceneRef.current;
+    if (!src || !s) return null;
+    const clone = src.cloneNode(true) as SVGSVGElement;
+    const srcEls = src.querySelectorAll<SVGElement>("*");
+    const cloneEls = clone.querySelectorAll<SVGElement>("*");
+    const KEEP = [
+      "fill",
+      "stroke",
+      "stroke-width",
+      "stroke-dasharray",
+      "font-size",
+      "font-family",
+      "font-weight",
+      "opacity",
+      "text-anchor",
+      "dominant-baseline",
+    ];
+    srcEls.forEach((el, i) => {
+      const target = cloneEls[i];
+      if (!target) return;
+      const cs = getComputedStyle(el);
+      const style = KEEP.map((p) => `${p}:${cs.getPropertyValue(p)}`).join(";");
+      target.setAttribute("style", style);
+    });
+    // Strip interaction-only artifacts.
+    clone.querySelectorAll(".marquee, .handle, foreignObject").forEach((el) => el.remove());
+    // Frame the content.
+    const boxes = s.cells.filter((c) => c.geometry).map((c) => c.geometry!);
+    if (boxes.length === 0) return null;
+    const minX = Math.min(...boxes.map((g) => g.x)) - 40;
+    const minY = Math.min(...boxes.map((g) => g.y)) - 40;
+    const maxX = Math.max(...boxes.map((g) => g.x + g.width)) + 40;
+    const maxY = Math.max(...boxes.map((g) => g.y + g.height)) + 40;
+    const w = Math.ceil(maxX - minX);
+    const h = Math.ceil(maxY - minY);
+    const g = clone.querySelector("g");
+    g?.setAttribute("transform", `translate(${-minX}, ${-minY})`);
+    clone.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    clone.setAttribute("width", String(w));
+    clone.setAttribute("height", String(h));
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    const bg = getComputedStyle(src).backgroundColor;
+    return (
+      `<svg ${Array.from(clone.attributes).map((a) => `${a.name}="${a.value}"`).join(" ")}>` +
+      `<rect width="100%" height="100%" fill="${bg}"/>` +
+      clone.innerHTML +
+      `</svg>`
+    );
+  };
+
+  const exportCanvas = async (format: "svg" | "png" | "obsidian" | "excalidraw") => {
+    const stem = titleOfPath(pathRef.current);
+    if (format === "obsidian" || format === "excalidraw") {
+      const ext = format === "obsidian" ? "canvas" : "excalidraw";
+      const dest = await saveDialog({
+        defaultPath: `${stem}.${ext}`,
+        filters: [{ name: format, extensions: [ext] }],
+      });
+      if (typeof dest !== "string") return;
+      await api.canvasExport(pathRef.current, format, dest);
+      return;
+    }
+    const svgText = buildExportSvg();
+    if (!svgText) return;
+    if (format === "svg") {
+      const dest = await saveDialog({
+        defaultPath: `${stem}.svg`,
+        filters: [{ name: "SVG", extensions: ["svg"] }],
+      });
+      if (typeof dest !== "string") return;
+      await api.exportFile(dest, btoa(unescape(encodeURIComponent(svgText))));
+      return;
+    }
+    // PNG: rasterize the SVG at 2x.
+    const dest = await saveDialog({
+      defaultPath: `${stem}.png`,
+      filters: [{ name: "PNG", extensions: ["png"] }],
+    });
+    if (typeof dest !== "string") return;
+    const img = new Image();
+    const url = URL.createObjectURL(new Blob([svgText], { type: "image/svg+xml" }));
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error("SVG rasterization failed"));
+      img.src = url;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = img.naturalWidth * 2;
+    canvas.height = img.naturalHeight * 2;
+    const ctx = canvas.getContext("2d")!;
+    ctx.scale(2, 2);
+    ctx.drawImage(img, 0, 0);
+    URL.revokeObjectURL(url);
+    const dataUrl = canvas.toDataURL("image/png");
+    await api.exportFile(dest, dataUrl.split(",")[1]);
+  };
+
   const onCellDoubleClick = (cell: SceneCell) => {
     if ((cell.kind === "note_link" || cell.kind === "database_link") && cell.href) {
       const parts = pathRef.current.split("/").slice(0, -1);
@@ -523,6 +701,11 @@ export default function CanvasView({ path, active }: { path: string; active: boo
           </button>
         ))}
         <div className="spacer" />
+        <FramesMenu
+          frames={scene.cells.filter((c) => c.kind === "frame" && c.geometry)}
+          onJump={(g) => zoomToRect(g)}
+        />
+        <ExportMenu onExport={(f) => void exportCanvas(f)} />
         <button onClick={zoomToFit} title="Zoom to fit (Ctrl+1)">
           Fit
         </button>

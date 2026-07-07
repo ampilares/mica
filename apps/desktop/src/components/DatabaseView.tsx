@@ -9,8 +9,10 @@ import {
   PropertyType,
   isApiError,
 } from "../api";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { docEvents } from "../docEvents";
 import { useStore, titleOfPath } from "../store";
+import CsvImportDialog from "./CsvImportDialog";
 
 interface Props {
   path: string;
@@ -27,6 +29,7 @@ const PROPERTY_TYPES: PropertyType[] = [
   "multi_select",
   "date",
   "url",
+  "note_link",
 ];
 
 const OPERATORS_BY_TYPE: Record<string, string[]> = {
@@ -47,6 +50,8 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
   const [orderedRows, setOrderedRows] = useState<DbRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [peekRowId, setPeekRowId] = useState<string | null>(null);
+  const [csvSrc, setCsvSrc] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const openTab = useStore((s) => s.openTab);
   const pathRef = useRef(path);
   pathRef.current = path;
@@ -133,17 +138,12 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
         >
           {db.title}
         </span>
-        <div className="db-view-switch">
-          {db.views.map((v) => (
-            <button
-              key={v.id}
-              className={v.id === view.id ? "active" : ""}
-              onClick={() => setViewId(v.id)}
-            >
-              {v.name}
-            </button>
-          ))}
-        </div>
+        <ViewSwitcher
+          db={db}
+          activeId={view.id}
+          setViewId={setViewId}
+          apply={apply}
+        />
         {view.type === "table" && (
           <>
             <SortMenu db={db} view={view} apply={apply} />
@@ -151,6 +151,28 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
           </>
         )}
         <div className="spacer" />
+        {!embed && (
+          <span className="menu-anchor">
+            <CsvMenu
+              onImport={async () => {
+                const src = await openDialog({
+                  multiple: false,
+                  filters: [{ name: "CSV", extensions: ["csv"] }],
+                });
+                if (typeof src === "string") setCsvSrc(src);
+              }}
+              onExport={async () => {
+                const dest = await saveDialog({
+                  defaultPath: `${titleOfPath(path)}.csv`,
+                  filters: [{ name: "CSV", extensions: ["csv"] }],
+                });
+                if (typeof dest !== "string") return;
+                const n = await api.dbExportCsv(path, view.id, dest);
+                setNotice(`Exported ${n} rows.`);
+              }}
+            />
+          </span>
+        )}
         {embed && (
           <button
             className="small"
@@ -164,6 +186,26 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
         </button>
       </div>
       {error && <div className="banner warning">{error}</div>}
+      {notice && (
+        <div className="banner info" onClick={() => setNotice(null)}>
+          {notice}
+        </div>
+      )}
+      {csvSrc && (
+        <CsvImportDialog
+          db={db}
+          src={csvSrc}
+          onClose={() => setCsvSrc(null)}
+          onImport={async (mapping) => {
+            const result = await api.dbImportCsv(pathRef.current, csvSrc, mapping, version);
+            const parsed: Database = JSON.parse(result.content);
+            setDb(parsed);
+            setVersion(result.version);
+            await refreshRows(parsed);
+            setNotice("Import complete.");
+          }}
+        />
+      )}
       <div className="db-body">
         {view.type === "table" ? (
           <TableView
@@ -185,6 +227,109 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function CsvMenu({
+  onImport,
+  onExport,
+}: {
+  onImport: () => Promise<void>;
+  onExport: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button className="small" onClick={() => setOpen(!open)}>
+        CSV ▾
+      </button>
+      {open && (
+        <div className="dropdown" onMouseLeave={() => setOpen(false)}>
+          <button
+            onClick={() => {
+              setOpen(false);
+              void onImport();
+            }}
+          >
+            Import CSV…
+          </button>
+          <button
+            onClick={() => {
+              setOpen(false);
+              void onExport();
+            }}
+          >
+            Export view as CSV…
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ------------------------------------------------------ view switcher ----
+
+/** Multiple named views per database (FR-DB-009): switch, add, rename, delete. */
+function ViewSwitcher({
+  db,
+  activeId,
+  setViewId,
+  apply,
+}: {
+  db: Database;
+  activeId: string;
+  setViewId: (id: string) => void;
+  apply: (ops: DbOp[]) => Promise<void>;
+}) {
+  const [addOpen, setAddOpen] = useState(false);
+
+  const addView = async (type: "table" | "kanban") => {
+    setAddOpen(false);
+    const name = prompt("View name", type === "table" ? "Table" : "Board");
+    if (!name) return;
+    await apply([{ op: "view_add", name, view_type: type }]);
+  };
+
+  return (
+    <div className="db-view-switch">
+      {db.views.map((v) => (
+        <button
+          key={v.id}
+          className={v.id === activeId ? "active" : ""}
+          onClick={() => setViewId(v.id)}
+          onDoubleClick={async () => {
+            const name = prompt("Rename view", v.name);
+            if (name && name !== v.name)
+              await apply([{ op: "view_rename", view_id: v.id, name }]);
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            if (db.views.length <= 1) return;
+            if (confirm(`Delete view "${v.name}"?`)) {
+              if (v.id === activeId) {
+                const other = db.views.find((x) => x.id !== v.id);
+                if (other) setViewId(other.id);
+              }
+              void apply([{ op: "view_delete", view_id: v.id }]);
+            }
+          }}
+          title="Double-click to rename · right-click to delete"
+        >
+          {v.name}
+        </button>
+      ))}
+      <span className="menu-anchor">
+        <button className="small" onClick={() => setAddOpen(!addOpen)} title="Add view">
+          +
+        </button>
+        {addOpen && (
+          <div className="dropdown" onMouseLeave={() => setAddOpen(false)}>
+            <button onClick={() => void addView("table")}>New table view</button>
+            <button onClick={() => void addView("kanban")}>New kanban view</button>
+          </div>
+        )}
+      </span>
     </div>
   );
 }
@@ -758,6 +903,8 @@ function CellEditor({
           onChange={(e) => onChange(e.target.value || null)}
         />
       );
+    case "note_link":
+      return <NoteLinkCell value={typeof value === "string" ? value : ""} onChange={onChange} />;
     case "number":
       return (
         <DebouncedInput
@@ -775,6 +922,55 @@ function CellEditor({
         />
       );
   }
+}
+
+/** A row ↔ note link (FR-DB-010): stores the vault-relative note path;
+ * click opens the note, edit picks a note by title (creates it if missing). */
+function NoteLinkCell({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (value: unknown) => void;
+}) {
+  const openTab = useStore((s) => s.openTab);
+  const pick = async () => {
+    const title = prompt("Link to note (title)", value ? titleOfPath(value) : "");
+    if (title === null) return;
+    if (title === "") {
+      onChange(null);
+      return;
+    }
+    try {
+      let target = await api.resolveWiki(title);
+      if (!target) {
+        const file = await api.noteCreate(title);
+        target = file.path;
+        await useStore.getState().refreshTree();
+      }
+      onChange(target);
+    } catch (e) {
+      console.error("note link failed", e);
+    }
+  };
+  return (
+    <span className="note-link-cell">
+      {value ? (
+        <button
+          className="linkish"
+          title={value}
+          onClick={() => openTab({ path: value, kind: "note", title: titleOfPath(value) })}
+        >
+          {titleOfPath(value)}
+        </button>
+      ) : (
+        <span className="muted small">—</span>
+      )}
+      <button className="small edit-link" title="Choose note" onClick={() => void pick()}>
+        ✎
+      </button>
+    </span>
+  );
 }
 
 function DebouncedInput({

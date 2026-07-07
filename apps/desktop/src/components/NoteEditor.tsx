@@ -18,6 +18,8 @@ import { WikiLinkHighlight } from "../editor/wikiLinks";
 import SuggestionPopup, { PopupState, PopupItem } from "../editor/SuggestionPopup";
 import { relativeTo, resolveRelative } from "../editor/paths";
 import DatabaseCodeBlock from "../editor/DatabaseCodeBlock";
+import ModeToggle from "./ModeToggle";
+import { useSettings } from "../settings";
 
 /**
  * Image node that keeps a vault-relative `src` in the document (canonical
@@ -239,7 +241,10 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
 
   const scheduleSave = useCallback(() => {
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(() => void save(), 1000);
+    saveTimer.current = window.setTimeout(
+      () => void save(),
+      useSettings.getState().autosaveDelay,
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -373,7 +378,10 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
           </button>
         </div>
       )}
-      <div className="note-title">{titleOfPath(path)}</div>
+      <div className="note-header">
+        <div className="note-title">{titleOfPath(path)}</div>
+        <ModeToggle path={path} />
+      </div>
       {editor && (
         <BubbleMenu editor={editor} tippyOptions={{ duration: 100 }}>
           <div className="bubble-menu">

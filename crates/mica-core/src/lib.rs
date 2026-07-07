@@ -22,7 +22,8 @@ pub const CANVAS_SCHEMA_VERSION: u32 = 1;
 /// Schema version of `.workspace/config.json`.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 /// Schema version of the SQLite index; bump to force a rebuild.
-pub const INDEX_SCHEMA_VERSION: u32 = 1;
+/// v2: database rows and canvas labels are FTS-indexed (FR-SRCH-002).
+pub const INDEX_SCHEMA_VERSION: u32 = 2;
 
 /// Name of the hidden per-vault folder holding config, index, and backups.
 pub const WORKSPACE_DIR: &str = ".workspace";

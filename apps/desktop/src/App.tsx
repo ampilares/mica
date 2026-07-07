@@ -6,6 +6,7 @@ import Onboarding from "./components/Onboarding";
 import Sidebar from "./components/Sidebar";
 import Tabs from "./components/Tabs";
 import NoteEditor from "./components/NoteEditor";
+import SourceEditor from "./components/SourceEditor";
 import DatabaseView from "./components/DatabaseView";
 import CanvasView from "./components/CanvasView";
 import QuickSwitcher from "./components/QuickSwitcher";
@@ -15,7 +16,10 @@ import StatusBar from "./components/StatusBar";
 import CommandPalette from "./components/CommandPalette";
 import RightPanel from "./components/RightPanel";
 import DataExplainer from "./components/DataExplainer";
+import SettingsDialog from "./components/SettingsDialog";
+import GraphPanel from "./components/GraphPanel";
 import { docEvents } from "./docEvents";
+import { useSettings, applySettings } from "./settings";
 
 export default function App() {
   const vault = useStore((s) => s.vault);
@@ -24,6 +28,18 @@ export default function App() {
   const refreshTree = useStore((s) => s.refreshTree);
   const setQuickSwitcherOpen = useStore((s) => s.setQuickSwitcherOpen);
   const setSearchOpen = useStore((s) => s.setSearchOpen);
+  const sourceMode = useStore((s) => s.sourceMode);
+
+  // Apply appearance settings (theme, fonts) whenever they change.
+  const settings = useSettings();
+  useEffect(() => {
+    applySettings(settings);
+    if (settings.theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const onChange = () => applySettings(useSettings.getState());
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, [settings]);
 
   // Global keyboard shortcuts.
   useEffect(() => {
@@ -41,6 +57,18 @@ export default function App() {
       } else if (mod && e.key === "\\") {
         e.preventDefault();
         useStore.getState().setRightPanelOpen(!useStore.getState().rightPanelOpen);
+      } else if (mod && e.key === "g") {
+        e.preventDefault();
+        useStore.getState().setGraphOpen(!useStore.getState().graphOpen);
+      } else if (mod && e.key === ",") {
+        e.preventDefault();
+        useStore.getState().setSettingsOpen(true);
+      } else if (mod && e.key === "e") {
+        const s = useStore.getState();
+        if (s.activePath && kindOfPath(s.activePath) === "note") {
+          e.preventDefault();
+          s.toggleSourceMode(s.activePath);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -76,7 +104,12 @@ export default function App() {
             const active = tab.path === activePath;
             return (
               <div key={tab.path} className="doc-pane" style={{ display: active ? "flex" : "none" }}>
-                {kind === "note" && <NoteEditor path={tab.path} active={active} />}
+                {kind === "note" &&
+                  (sourceMode[tab.path] ? (
+                    <SourceEditor key="src" path={tab.path} active={active} />
+                  ) : (
+                    <NoteEditor key="rich" path={tab.path} active={active} />
+                  ))}
                 {kind === "database" && <DatabaseView path={tab.path} embed={false} />}
                 {kind === "canvas" && <CanvasView path={tab.path} active={active} />}
                 {kind === "other" && (
@@ -105,6 +138,8 @@ export default function App() {
       <CommandPalette />
       <ConflictDialog />
       <DataExplainer />
+      <SettingsDialog />
+      <GraphPanel />
     </div>
   );
 }

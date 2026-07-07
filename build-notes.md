@@ -1,71 +1,76 @@
-# Build notes — 2026-07-07
+# Build notes — 2026-07-07 (session 3)
 
 Session state for whoever (human or agent) picks this up next.
 
 ## Where things stand
 
-**MVP (commit 1)** is built and e2e-verified: full Rust workspace + Tauri 2
-shell + React/Tiptap frontend. Verified by driving the real app over the
-WebView2 devtools protocol — suites live in `tools/e2e/` (35 backend + 17 UI
-checks, all passing at commit time).
+**MVP + Phase 1–5 features (commits 1–2)** are built and fully verified this
+session: 45/45 backend + 17/17 UI e2e checks pass against the live app.
+The verification pass the previous session left unfinished is done, including
+the previously-lost plan to extend the backend suite (checks for duplicate,
+backup, rename-link-rewrite, asset_save are now in `backend.e2e.mjs`).
 
-**Phase 1–5 follow-up work (this commit)** is code-complete and typechecked
-(`tsc` clean, `cargo check -p mica-tauri` clean, all Rust unit tests passing
-at last run), but the final full-suite verification pass was intentionally
-stopped before running. What was added:
+**Phase 6 (P1 features) — this session** is code-complete and e2e-verified
+(22/22 checks in the new `tools/e2e/phase6.e2e.mjs`):
 
-### Rust core
-- `SearchIndex::sync` — warm-start indexing by (mtime, size) diff; used on
-  vault open instead of full rebuild (NFR-PERF-001).
-- `note_rename` now rewrites relative Markdown links in referring notes
-  (`mica_markdown::rewrite_links`, minimal-diff, tested).
-- New commands: `note_duplicate` (fresh ULID for the copy), `asset_save`
-  (base64 → `assets/images/`), `vault_backup` (snapshot to
-  `.workspace/backups/<stamp>/`), `vault_import_folder` (copy-in, collision-
-  safe), `vault_export`.
-- `CanvasOp::ReorderCell` for z-order.
-- New tests: link rewrite, backup, import, interrupted-save (crash window).
-- `tauri.conf.json`: asset protocol enabled (+ `protocol-asset` feature) so
-  vault images render in the editor.
+- **Markdown source mode** (FR-NOTE-009): CodeMirror 6 raw-source editor with
+  Rich/Source toggle (Ctrl+E), full-file editing incl. frontmatter — the Git
+  conflict-marker surface. `SourceEditor.tsx`, `ModeToggle.tsx`.
+- **Settings** (FR-SET): `SettingsDialog.tsx` (Ctrl+,) — theme
+  (dark/light/system), UI/editor fonts + size, autosave delay (app-level,
+  localStorage via zustand/persist in `settings.ts`); vault name, attachments
+  folder, new-notes folder, naming strategy (vault-level, new `config_get`/
+  `config_set` commands; `Vault::set_config` with `RwLock<VaultConfig>`;
+  `naming: "slug" | "title"` drives `note_create` file names).
+- **Multiple views per DB** (FR-DB-009): `view_add`/`view_delete`/`view_rename`
+  ops; switcher UI (+ button, double-click rename, right-click delete).
+- **Linked note rows** (FR-DB-010): `note_link` property type in the UI —
+  clickable cell opens the note; picker resolves/creates by title.
+- **CSV import/export** (FR-IMP-002/FR-EXP-002): `mica_db::csv` (RFC-4180
+  reader, mapping import w/ new-property + select-option creation,
+  view-ordered export); `csv_preview`/`db_import_csv`/`db_export_csv`
+  commands; column-mapping dialog `CsvImportDialog.tsx` + CSV menu in the DB
+  toolbar.
+- **Search over DB rows + canvas labels** (FR-SRCH-002): indexed into FTS;
+  INDEX_SCHEMA_VERSION bumped to 2 (old indexes rebuild on open).
+- **Graph panel** (FR-SRCH-006): `SearchIndex::graph` + `link_graph` command;
+  `GraphPanel.tsx` (Ctrl+G) — local graph (depth 2) or whole vault,
+  deterministic force layout, click-to-open/recenter.
+- **Canvas exports + interop**: PNG/SVG export from the live SVG (style
+  inlining + rasterization; `export_file` command writes bytes);
+  Obsidian Canvas + Excalidraw import/export (`mica_drawio::interop`,
+  `canvas_import`/`canvas_export` commands, href re-basing between
+  canvas-relative and vault-relative); frames navigation dropdown
+  (FR-CAN-008, zoom-to-frame).
+- **UI/UX redesign (first pass)**: Notion/AFFiNE-style token system in
+  `styles.css` — refined dark + light palettes (`:root[data-theme=…]`),
+  ghost buttons, pill hovers, layered shadows, slim scrollbars, modal
+  animations, larger note titles, theme-aware canvas cell colors. Default
+  theme is now `system`. Both themes screenshot-verified.
 
-### Frontend
-- Command palette (Ctrl+K): new note/db/canvas, search, backup, import
-  folder, export current, duplicate, reveal, rebuild index, where-is-my-data,
-  close vault.
-- Right panel (Ctrl+\\): outline, backlinks, outgoing links.
-- Bubble formatting toolbar (bold/italic/strike/code/link) on selection.
-- Image paste → saved to assets, displayed via asset protocol (`VaultImage`
-  node view keeps the vault-relative src in the Markdown).
-- DatabaseView rewritten: rows come from `db_query` (core-side sort/filter),
-  sort + filter menus persisting to the view, column header menus
-  (rename/hide/retype-lite/delete/add option), drag column resize persisted
-  to `column_widths`, row side-peek panel, windowed row virtualization
-  (~ROW_HEIGHT 34px, 10-row overscan).
-- CanvasView rewritten: multi-select + shift-click, marquee select, group
-  move (frames carry geometric contents), zoom-to-fit (Ctrl+1) / reset
-  (Ctrl+0) / select-all (Ctrl+A) / duplicate (Ctrl+D), bring-front/send-back,
-  drag a note/database from the sidebar onto the canvas → link cell.
-- Conflict dialog now shows a compact line diff (mine vs disk) — `src/diff.ts`.
-- DataExplainer modal; `docs/vault-format.md` public format docs.
+Rust: 50 tests green across the workspace. `tsc` clean.
 
 ## Not done yet (next session)
 
-1. **Verification pass**: rebuild `target/debug/mica-tauri.exe`, restart the
-   app + Vite (`npm run dev` in apps/desktop, port 1420), rerun
-   `tools/e2e/backend.e2e.mjs` and `ui.e2e.mjs` with a fresh test vault at
-   `C:/Users/Administrator/Documents/mica-test-vault`. There was an
-   **uncommitted plan** to extend backend.e2e.mjs with checks 16–19
-   (duplicate, backup, rename-link-rewrite, asset_save) — re-apply that.
-2. New UI surfaces (palette, right panel, bubble menu, sort/filter, marquee,
-   image paste) have no automated UI checks yet — extend `ui.e2e.mjs`.
-3. Windows installer: `npx tauri build` from `crates/mica-tauri` (NSIS).
-4. Remaining plan gaps: Markdown source mode (CodeMirror), CSV import/export,
-   canvas PNG/SVG export, graph panel, settings UI, performance benchmarks
-   against 10k-note fixture vaults, fuzzing.
+1. **Block-reference embeds** (FR-NOTE-010, Phase 6 item 10) — not started.
+2. **Canvas PNG/SVG export**: implemented but not e2e-verified (needs the
+   native save dialog; verify manually via canvas toolbar → Export).
+3. **draw.io import hardening** beyond parse-through (FR-IMP-003 edge cases).
+4. **Phase 6 item 11**: perf tuning on 25k-note vaults; benchmarks vs the 10k
+   fixture vault remain a Phase 5 gate.
+5. **UI redesign iteration**: first pass shipped; expect feedback rounds
+   (typography scale, sidebar icons, empty states, onboarding polish) before
+   Phase 5 hardening starts.
+6. Then **Phase 5**: PRD §30 matrix, crash-recovery journal, fuzzing,
+   perf gates, accessibility, installers (NSIS via `npx tauri build`).
 
 ## Environment notes
 
-- Toolchain: Rust 1.96.1 MSVC, VS Build Tools 2022, Node 22.
+- Toolchain: Rust 1.96.1 MSVC (cargo at `~/.cargo/bin`, not always on PATH),
+  Node 24, VS Build Tools 2022.
+- E2E: see `tools/e2e/README.md`. Vault path is `MICA_E2E_VAULT` or
+  `%USERPROFILE%/Documents/mica-test-vault`; `prepare-vault.mjs` builds the
+  fixture. Suites run in order: backend → ui → phase6.
 - E2E driving: launch the exe with
   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`;
   dev builds expose `window.__mica = { api, useStore }` (dev only).

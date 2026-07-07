@@ -9,7 +9,7 @@ use mica_core::{ContentHash, CoreError, VaultPath, WORKSPACE_DIR};
 use mica_db::{apply_ops as apply_db_ops, Database, DbOp, QueryResult};
 use mica_drawio::{apply_canvas_ops, CanvasOp, Scene};
 use mica_markdown::NoteDocument;
-use mica_search::{BacklinkHit, QuickSwitchHit, SearchHit, SearchIndex, TagCount};
+use mica_search::{BacklinkHit, Graph, QuickSwitchHit, SearchHit, SearchIndex, TagCount};
 use mica_vault::{slugify, FileTree, Vault};
 use mica_watch::{SelfWriteFilter, VaultEvent, VaultWatcher};
 
@@ -209,8 +209,20 @@ pub fn note_create(
     title: String,
 ) -> ApiResult<LoadedFile> {
     let open = state.current().map_err(ApiError::from)?;
-    let dir = dir.unwrap_or_else(|| open.vault.config().notes_dir.clone());
-    let stem = slugify(&title);
+    let config = open.vault.config();
+    let dir = dir.unwrap_or_else(|| config.notes_dir.clone());
+    // Naming strategy (FR-SET): kebab-case slug (default) or title verbatim.
+    let stem = if config.naming == "title" {
+        let cleaned: String = title
+            .trim()
+            .chars()
+            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { ' ' } else { c })
+            .collect();
+        let cleaned = cleaned.trim().to_string();
+        if cleaned.is_empty() { slugify(&title) } else { cleaned }
+    } else {
+        slugify(&title)
+    };
     let path = open
         .vault
         .unique_path(&dir, &stem, "md")
@@ -372,6 +384,22 @@ pub fn asset_save(
 pub struct BackupOutcome {
     pub folder: String,
     pub files: usize,
+}
+
+#[tauri::command]
+pub fn config_get(state: State<'_, AppState>) -> ApiResult<mica_vault::VaultConfig> {
+    let open = state.current().map_err(ApiError::from)?;
+    Ok(open.vault.config())
+}
+
+#[tauri::command]
+pub fn config_set(
+    state: State<'_, AppState>,
+    config: mica_vault::VaultConfig,
+) -> ApiResult<mica_vault::VaultConfig> {
+    let open = state.current().map_err(ApiError::from)?;
+    open.vault.set_config(config).map_err(ApiError::from)?;
+    Ok(open.vault.config())
 }
 
 #[tauri::command]
@@ -576,6 +604,70 @@ pub fn db_apply(
     })
 }
 
+/// Read + parse an external CSV file for the import-mapping UI.
+#[tauri::command]
+pub fn csv_preview(src: String) -> ApiResult<mica_db::CsvPreview> {
+    let text = std::fs::read_to_string(&src).map_err(|e| ApiError {
+        code: "csv_read_failed".into(),
+        message: e.to_string(),
+        path: Some(src.clone()),
+    })?;
+    mica_db::preview_csv(&text, 8).map_err(ApiError::from)
+}
+
+/// Import an external CSV into an existing database using a column mapping.
+#[tauri::command]
+pub fn db_import_csv(
+    state: State<'_, AppState>,
+    path: String,
+    src: String,
+    mapping: Vec<mica_db::ColumnMapping>,
+    base_version: String,
+) -> ApiResult<DbApplyOutcome> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let (content, disk_version) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    if disk_version.as_str() != base_version {
+        return Err(ApiError::from(CoreError::Conflict { path: rel }));
+    }
+    let text = std::fs::read_to_string(&src).map_err(|e| ApiError {
+        code: "csv_read_failed".into(),
+        message: e.to_string(),
+        path: Some(src.clone()),
+    })?;
+    let mut db = Database::parse(&content).map_err(ApiError::from)?;
+    mica_db::import_csv(&mut db, &text, &mapping).map_err(ApiError::from)?;
+    db.touch();
+    let new_content = db.serialize().map_err(ApiError::from)?;
+    let version = guarded_write(&open, &rel, &new_content, Some(disk_version.as_str()))?;
+    Ok(DbApplyOutcome {
+        content: new_content,
+        version,
+    })
+}
+
+/// Export one view of a database as CSV to an external path.
+#[tauri::command]
+pub fn db_export_csv(
+    state: State<'_, AppState>,
+    path: String,
+    view_id: String,
+    dest: String,
+) -> ApiResult<usize> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let (content, _) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    let db = Database::parse(&content).map_err(ApiError::from)?;
+    let csv = mica_db::export_csv(&db, &view_id).map_err(ApiError::from)?;
+    let rows = csv.lines().count().saturating_sub(1);
+    std::fs::write(&dest, csv.as_bytes()).map_err(|e| ApiError {
+        code: "csv_write_failed".into(),
+        message: e.to_string(),
+        path: Some(dest.clone()),
+    })?;
+    Ok(rows)
+}
+
 #[tauri::command]
 pub fn db_query(
     state: State<'_, AppState>,
@@ -659,6 +751,160 @@ pub fn canvas_apply(
     })
 }
 
+/// Resolve an href written relative to `canvas_path`'s folder into a
+/// vault-relative path ("canvases/x.drawio" + "../notes/a.md" → "notes/a.md").
+fn href_to_vault_path(canvas_path: &VaultPath, href: &str) -> Option<String> {
+    let dir = canvas_path
+        .as_str()
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("");
+    let combined = if dir.is_empty() {
+        href.to_string()
+    } else {
+        format!("{dir}/{href}")
+    };
+    VaultPath::new(&combined).ok().map(|p| p.as_str().to_string())
+}
+
+/// Re-base a vault-relative path so it is relative to `canvas_path`'s folder.
+fn vault_path_to_href(canvas_path: &VaultPath, target: &str) -> String {
+    let dir = canvas_path
+        .as_str()
+        .rsplit_once('/')
+        .map(|(d, _)| d)
+        .unwrap_or("");
+    if dir.is_empty() {
+        return target.to_string();
+    }
+    let ups = dir.split('/').count();
+    format!("{}{target}", "../".repeat(ups))
+}
+
+/// Import an external canvas file (.canvas, .excalidraw, or foreign .drawio)
+/// as a new canonical `.drawio` in the vault (spec §4.4.1 / FR-IMP-003).
+#[tauri::command]
+pub fn canvas_import(
+    state: State<'_, AppState>,
+    src: String,
+    title: Option<String>,
+) -> ApiResult<LoadedFile> {
+    let open = state.current().map_err(ApiError::from)?;
+    let src_path = PathBuf::from(&src);
+    let text = std::fs::read_to_string(&src_path).map_err(|e| ApiError {
+        code: "import_read_failed".into(),
+        message: e.to_string(),
+        path: Some(src.clone()),
+    })?;
+    let stem = title.unwrap_or_else(|| {
+        src_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Imported canvas".into())
+    });
+    let ext = src_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let mut scene = match ext.as_str() {
+        "canvas" => mica_drawio::interop::import_obsidian(&stem, &text).map_err(ApiError::from)?,
+        "excalidraw" => {
+            mica_drawio::interop::import_excalidraw(&stem, &text).map_err(ApiError::from)?
+        }
+        // Foreign draw.io: parse through our reader (unknown cells preserved).
+        _ => Scene::parse(&text).map_err(ApiError::from)?,
+    };
+
+    let dir = open.vault.config().canvases_dir.clone();
+    let path = open
+        .vault
+        .unique_path(&dir, &slugify(&stem), "drawio")
+        .map_err(ApiError::from)?;
+
+    // Obsidian file nodes carry vault-relative paths; re-base them onto the
+    // new canvas location.
+    if ext == "canvas" {
+        for cell in &mut scene.cells {
+            if let Some(href) = &cell.href {
+                cell.href = Some(vault_path_to_href(&path, href));
+            }
+        }
+    }
+
+    let content = scene.serialize().map_err(ApiError::from)?;
+    let version = guarded_write(&open, &path, &content, None)?;
+    Ok(LoadedFile {
+        path,
+        content,
+        version,
+    })
+}
+
+/// Export a canvas to an external file as Obsidian Canvas or Excalidraw
+/// (one-shot, documented-lossy — FR-EXP / spec §4.4.1).
+#[tauri::command]
+pub fn canvas_export(
+    state: State<'_, AppState>,
+    path: String,
+    format: String,
+    dest: String,
+) -> ApiResult<()> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let (content, _) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    let mut scene = Scene::parse(&content).map_err(ApiError::from)?;
+
+    let out = match format.as_str() {
+        "obsidian" => {
+            // Obsidian wants vault-relative file paths.
+            for cell in &mut scene.cells {
+                if let Some(href) = &cell.href {
+                    if let Some(vp) = href_to_vault_path(&rel, href) {
+                        cell.href = Some(vp);
+                    }
+                }
+            }
+            mica_drawio::interop::export_obsidian(&scene).map_err(ApiError::from)?
+        }
+        "excalidraw" => {
+            mica_drawio::interop::export_excalidraw(&scene).map_err(ApiError::from)?
+        }
+        other => {
+            return Err(ApiError {
+                code: "bad_format".into(),
+                message: format!("unknown canvas export format: {other}"),
+                path: None,
+            })
+        }
+    };
+    std::fs::write(&dest, out.as_bytes()).map_err(|e| ApiError {
+        code: "export_write_failed".into(),
+        message: e.to_string(),
+        path: Some(dest.clone()),
+    })?;
+    Ok(())
+}
+
+/// Write frontend-generated bytes (canvas PNG/SVG exports) to an external
+/// path picked through the save dialog.
+#[tauri::command]
+pub fn export_file(dest: String, data_base64: String) -> ApiResult<()> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|e| ApiError {
+            code: "bad_data".into(),
+            message: e.to_string(),
+            path: None,
+        })?;
+    std::fs::write(&dest, &bytes).map_err(|e| ApiError {
+        code: "export_write_failed".into(),
+        message: e.to_string(),
+        path: Some(dest.clone()),
+    })
+}
+
 // ---------------------------------------------------------------- search ----
 
 #[tauri::command]
@@ -690,6 +936,22 @@ pub fn links_backlinks(state: State<'_, AppState>, path: String) -> ApiResult<Ve
     let rel = VaultPath::new(&path).map_err(ApiError::from)?;
     let idx = open.index.lock().unwrap();
     idx.backlinks(&rel).map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn link_graph(
+    state: State<'_, AppState>,
+    center: Option<String>,
+    depth: Option<usize>,
+) -> ApiResult<Graph> {
+    let open = state.current().map_err(ApiError::from)?;
+    let center = match center {
+        Some(c) => Some(VaultPath::new(&c).map_err(ApiError::from)?),
+        None => None,
+    };
+    let idx = open.index.lock().unwrap();
+    idx.graph(center.as_ref(), depth.unwrap_or(2))
+        .map_err(ApiError::from)
 }
 
 #[tauri::command]

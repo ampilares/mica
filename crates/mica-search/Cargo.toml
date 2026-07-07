@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 mica-core = { workspace = true }
+mica-db = { workspace = true }
+mica-drawio = { workspace = true }
 mica-markdown = { workspace = true }
 mica-vault = { workspace = true }
 rusqlite = { workspace = true }

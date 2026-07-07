@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api, SearchHit } from "../api";
-import { useStore, titleOfPath } from "../store";
+import { useStore, titleOfPath, kindOfPath } from "../store";
 
 export default function SearchPanel() {
   const open = useStore((s) => s.searchOpen);
@@ -58,7 +58,7 @@ export default function SearchPanel() {
               key={hit.path}
               className="palette-item search-hit"
               onClick={() => {
-                openTab({ path: hit.path, kind: "note", title: titleOfPath(hit.path) });
+                openTab({ path: hit.path, kind: kindOfPath(hit.path), title: titleOfPath(hit.path) });
                 setOpen(false);
               }}
             >

@@ -16,6 +16,18 @@ export interface VaultInfo {
   name: string;
 }
 
+/** Mirror of mica-vault VaultConfig (.workspace/config.json). */
+export interface VaultConfig {
+  schema_version: number;
+  name: string;
+  notes_dir: string;
+  databases_dir: string;
+  canvases_dir: string;
+  assets_dir: string;
+  naming: string;
+  [key: string]: unknown;
+}
+
 export type FileKind = "note" | "database" | "canvas" | "asset" | "other";
 
 export interface FileNode {
@@ -62,6 +74,11 @@ export interface BacklinkHit {
 export interface TagCount {
   tag: string;
   count: number;
+}
+
+export interface LinkGraph {
+  nodes: { path: string; title: string; kind: FileKind }[];
+  edges: { source: string; target: string }[];
 }
 
 export type VaultEvent =
@@ -143,6 +160,9 @@ export type DbOp =
   | { op: "property_delete"; property_id: string }
   | { op: "select_option_add"; property_id: string; name: string; color?: string }
   | { op: "view_update"; view: DbView }
+  | { op: "view_add"; name: string; view_type: "table" | "kanban"; group_by?: string }
+  | { op: "view_delete"; view_id: string }
+  | { op: "view_rename"; view_id: string; name: string }
   | { op: "kanban_move"; view_id: string; row_id: string; to_group: string; index: number }
   | { op: "title_set"; title: string };
 
@@ -150,6 +170,17 @@ export interface QueryResult {
   total: number;
   rows: DbRow[];
   groups?: { group: string; row_ids: string[] }[];
+}
+
+export type ColumnMapping =
+  | { kind: "skip" }
+  | { kind: "property"; property_id: string }
+  | { kind: "new"; name: string; prop_type: PropertyType };
+
+export interface CsvPreview {
+  headers: string[];
+  sample: string[][];
+  total_rows: number;
 }
 
 // ---- canvas types (mirror mica-drawio) ----
@@ -222,6 +253,8 @@ export const api = {
   noteDuplicate: (path: string) => invoke<LoadedFile>("note_duplicate", { path }),
   assetSave: (name: string, dataBase64: string) =>
     invoke<string>("asset_save", { name, dataBase64 }),
+  configGet: () => invoke<VaultConfig>("config_get"),
+  configSet: (config: VaultConfig) => invoke<VaultConfig>("config_set", { config }),
   vaultBackup: () => invoke<{ folder: string; files: number }>("vault_backup"),
   vaultImportFolder: (src: string, destDir?: string) =>
     invoke<number>("vault_import_folder", { src, destDir }),
@@ -245,18 +278,36 @@ export const api = {
     invoke<{ content: string; version: string }>("db_apply", { path, ops, baseVersion }),
   dbQuery: (path: string, viewId: string, offset = 0, limit = 0) =>
     invoke<QueryResult>("db_query", { path, viewId, offset, limit }),
+  csvPreview: (src: string) => invoke<CsvPreview>("csv_preview", { src }),
+  dbImportCsv: (path: string, src: string, mapping: ColumnMapping[], baseVersion: string) =>
+    invoke<{ content: string; version: string }>("db_import_csv", {
+      path,
+      src,
+      mapping,
+      baseVersion,
+    }),
+  dbExportCsv: (path: string, viewId: string, dest: string) =>
+    invoke<number>("db_export_csv", { path, viewId, dest }),
 
   canvasCreate: (title: string, dir?: string) =>
     invoke<LoadedFile>("canvas_create", { title, dir }),
   canvasLoad: (path: string) => invoke<LoadedFile>("canvas_load", { path }),
   canvasApply: (path: string, ops: CanvasOp[], baseVersion: string) =>
     invoke<{ content: string; version: string }>("canvas_apply", { path, ops, baseVersion }),
+  canvasImport: (src: string, title?: string) =>
+    invoke<LoadedFile>("canvas_import", { src, title }),
+  canvasExport: (path: string, format: "obsidian" | "excalidraw", dest: string) =>
+    invoke<void>("canvas_export", { path, format, dest }),
+  exportFile: (dest: string, dataBase64: string) =>
+    invoke<void>("export_file", { dest, dataBase64 }),
 
   searchQuery: (query: string, limit?: number) =>
     invoke<SearchHit[]>("search_query", { query, limit }),
   quickSwitch: (query: string, limit?: number) =>
     invoke<QuickSwitchHit[]>("quick_switch", { query, limit }),
   backlinks: (path: string) => invoke<BacklinkHit[]>("links_backlinks", { path }),
+  linkGraph: (center?: string, depth?: number) =>
+    invoke<LinkGraph>("link_graph", { center, depth }),
   tagsList: () => invoke<TagCount[]>("tags_list"),
   resolveWiki: (name: string) => invoke<string | null>("resolve_wiki", { name }),
   indexRebuild: () => invoke<number>("index_rebuild"),

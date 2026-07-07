@@ -44,6 +44,21 @@ pub enum DbOp {
     ViewUpdate {
         view: View,
     },
+    /// Add a named view (FR-DB-009). Kanban views default to grouping by the
+    /// first select property when `group_by` is not given.
+    ViewAdd {
+        name: String,
+        view_type: crate::model::ViewType,
+        #[serde(default)]
+        group_by: Option<String>,
+    },
+    ViewDelete {
+        view_id: String,
+    },
+    ViewRename {
+        view_id: String,
+        name: String,
+    },
     /// Move a kanban card: set the select value and reposition within group.
     KanbanMove {
         view_id: String,
@@ -199,6 +214,67 @@ fn apply_op(db: &mut Database, op: &DbOp) -> Result<()> {
                 None => db.views.push(view.clone()),
             }
         }
+        DbOp::ViewAdd {
+            name,
+            view_type,
+            group_by,
+        } => {
+            let group_by = if *view_type == crate::model::ViewType::Kanban {
+                group_by.clone().or_else(|| {
+                    db.properties
+                        .iter()
+                        .find(|p| p.prop_type == PropertyType::Select)
+                        .map(|p| p.id.clone())
+                })
+            } else {
+                group_by.clone()
+            };
+            if *view_type == crate::model::ViewType::Kanban && group_by.is_none() {
+                return Err(CoreError::Other(
+                    "kanban view needs a select property to group by".into(),
+                ));
+            }
+            let base: String = name
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect();
+            let mut id = format!("view_{base}");
+            let mut i = 2;
+            while db.views.iter().any(|v| v.id == id) {
+                id = format!("view_{base}_{i}");
+                i += 1;
+            }
+            db.views.push(View {
+                id,
+                name: name.clone(),
+                view_type: *view_type,
+                group_by,
+                sorts: Vec::new(),
+                filters: Vec::new(),
+                hidden_properties: Vec::new(),
+                column_order: Vec::new(),
+                column_widths: BTreeMap::new(),
+                group_order: BTreeMap::new(),
+            });
+        }
+        DbOp::ViewDelete { view_id } => {
+            if db.views.len() <= 1 {
+                return Err(CoreError::Other("a database needs at least one view".into()));
+            }
+            if !db.views.iter().any(|v| &v.id == view_id) {
+                return Err(CoreError::Other(format!("view not found: {view_id}")));
+            }
+            db.views.retain(|v| &v.id != view_id);
+        }
+        DbOp::ViewRename { view_id, name } => {
+            let view = db
+                .views
+                .iter_mut()
+                .find(|v| &v.id == view_id)
+                .ok_or_else(|| CoreError::Other(format!("view not found: {view_id}")))?;
+            view.name = name.clone();
+        }
         DbOp::KanbanMove {
             view_id,
             row_id,
@@ -294,6 +370,43 @@ mod tests {
         let status_prop = db.views[1].group_by.clone().unwrap();
         assert_eq!(db.rows[0].cells[&status_prop].value, json!("doing"));
         assert_eq!(db.views[1].group_order["doing"], vec![row_id]);
+    }
+
+    #[test]
+    fn view_lifecycle() {
+        let mut db = Database::new("T");
+        apply_ops(
+            &mut db,
+            &[DbOp::ViewAdd {
+                name: "Board 2".into(),
+                view_type: crate::model::ViewType::Kanban,
+                group_by: None,
+            }],
+        )
+        .unwrap();
+        assert_eq!(db.views.len(), 3);
+        let added = db.views.last().unwrap();
+        assert_eq!(added.id, "view_board_2");
+        // Defaults to the first select property.
+        assert!(added.group_by.is_some());
+
+        apply_ops(
+            &mut db,
+            &[DbOp::ViewRename {
+                view_id: "view_board_2".into(),
+                name: "Sprint board".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(db.views.last().unwrap().name, "Sprint board");
+
+        apply_ops(&mut db, &[DbOp::ViewDelete { view_id: "view_board_2".into() }]).unwrap();
+        assert_eq!(db.views.len(), 2);
+
+        // The last view can never be deleted.
+        apply_ops(&mut db, &[DbOp::ViewDelete { view_id: "table_default".into() }]).unwrap();
+        let err = apply_ops(&mut db, &[DbOp::ViewDelete { view_id: "kanban_status".into() }]);
+        assert!(err.is_err());
     }
 
     #[test]

@@ -5,10 +5,12 @@
 //! order + serde), 2-space indent, LF, trailing newline, rows in insertion
 //! order, stable ULIDs everywhere.
 
+pub mod csv;
 pub mod model;
 pub mod ops;
 pub mod query;
 
+pub use csv::{export_csv, import_csv, preview_csv, ColumnMapping, CsvPreview};
 pub use model::*;
 pub use ops::*;
 pub use query::*;

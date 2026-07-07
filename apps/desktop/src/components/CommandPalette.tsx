@@ -84,6 +84,16 @@ export default function CommandPalette() {
       hint: "outline · backlinks",
       run: () => useStore.getState().setRightPanelOpen(!useStore.getState().rightPanelOpen),
     },
+    ...(activePath?.endsWith(".md")
+      ? [
+          {
+            id: "toggle-source",
+            label: "Toggle Markdown source mode",
+            hint: "Ctrl+E",
+            run: () => useStore.getState().toggleSourceMode(activePath),
+          },
+        ]
+      : []),
     {
       id: "backup",
       label: "Back up vault",
@@ -91,6 +101,21 @@ export default function CommandPalette() {
       run: async () => {
         const r = await api.vaultBackup();
         setStatus(`Backed up ${r.files} files to backups/${r.folder}`);
+      },
+    },
+    {
+      id: "import-canvas",
+      label: "Import canvas…",
+      hint: ".canvas · .excalidraw · .drawio",
+      run: async () => {
+        const src = await open({
+          multiple: false,
+          filters: [{ name: "Canvas", extensions: ["canvas", "excalidraw", "drawio", "xml"] }],
+        });
+        if (typeof src !== "string") return;
+        const file = await api.canvasImport(src);
+        await refreshTree();
+        openTab({ path: file.path, kind: "canvas", title: titleOfPath(file.path) });
       },
     },
     {
@@ -158,6 +183,18 @@ export default function CommandPalette() {
         const n = await api.indexRebuild();
         setStatus(`Re-indexed ${n} files`);
       },
+    },
+    {
+      id: "graph",
+      label: "Open graph view",
+      hint: "Ctrl+G",
+      run: () => useStore.getState().setGraphOpen(true),
+    },
+    {
+      id: "settings",
+      label: "Settings",
+      hint: "Ctrl+,",
+      run: () => useStore.getState().setSettingsOpen(true),
     },
     {
       id: "where-data",

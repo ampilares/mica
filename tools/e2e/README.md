@@ -5,9 +5,13 @@ protocol (CDP) and verify behavior against real files on disk.
 
 ## Running
 
-1. Prepare a test vault at `C:/Users/Administrator/Documents/mica-test-vault`
-   (see `VAULT` constant) containing `notes/welcome.md` and `notes/roadmap.md`
-   with the fixture content the checks expect — or adapt the constants.
+1. Pick a vault location (defaults to `%USERPROFILE%/Documents/mica-test-vault`;
+   override with the `MICA_E2E_VAULT` env var) and create the fixture:
+
+   ```powershell
+   node tools/e2e/prepare-vault.mjs   # wipes + recreates the fixture vault
+   ```
+
 2. Start the Vite dev server: `npm run dev` in `apps/desktop`.
 3. Launch the app with remote debugging:
 
@@ -16,11 +20,12 @@ protocol (CDP) and verify behavior against real files on disk.
    .\target\debug\mica-tauri.exe
    ```
 
-4. Run the suites (Node 22+, no dependencies):
+4. Run the suites in order (Node 22+, no dependencies):
 
    ```powershell
    node tools/e2e/backend.e2e.mjs     # IPC + file-on-disk critical path
    node tools/e2e/ui.e2e.mjs out.png  # DOM rendering + autosave round-trip
+   node tools/e2e/phase6.e2e.mjs      # settings/views/CSV/graph/interop
    ```
 
 The UI suite relies on the dev-only `window.__mica` hook exposed in

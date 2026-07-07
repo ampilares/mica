@@ -40,6 +40,25 @@ pub struct TagCount {
     pub count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphNode {
+    pub path: VaultPath,
+    pub title: String,
+    pub kind: FileKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub source: VaultPath,
+    pub target: VaultPath,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Graph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
 pub struct SearchIndex {
     conn: Connection,
 }
@@ -525,6 +544,103 @@ impl SearchIndex {
         Ok(rows)
     }
 
+    /// Link graph for the graph panel (FR-SRCH-006). With a `center`, only
+    /// files within `depth` link-hops are returned; without one, the whole
+    /// vault's resolved link graph.
+    pub fn graph(&self, center: Option<&VaultPath>, depth: usize) -> Result<Graph> {
+        // All resolved edges between indexed files.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT f.path, l.target_path FROM links l
+                 JOIN files f ON f.id = l.source_file
+                 WHERE l.resolved = 1 AND l.target_path IS NOT NULL",
+            )
+            .map_err(|e| CoreError::Index(e.to_string()))?;
+        let all_edges: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| CoreError::Index(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+
+        // Select the node set.
+        let keep: std::collections::HashSet<String> = match center {
+            None => all_edges
+                .iter()
+                .flat_map(|(s, t)| [s.clone(), t.clone()])
+                .collect(),
+            Some(center) => {
+                let mut keep = std::collections::HashSet::new();
+                keep.insert(center.as_str().to_string());
+                let mut frontier = vec![center.as_str().to_string()];
+                for _ in 0..depth.max(1) {
+                    let mut next = Vec::new();
+                    for (s, t) in &all_edges {
+                        if frontier.contains(s) && keep.insert(t.clone()) {
+                            next.push(t.clone());
+                        }
+                        if frontier.contains(t) && keep.insert(s.clone()) {
+                            next.push(s.clone());
+                        }
+                    }
+                    frontier = next;
+                    if frontier.is_empty() {
+                        break;
+                    }
+                }
+                keep
+            }
+        };
+
+        let mut nodes = Vec::new();
+        for path in &keep {
+            let row: Option<(String, String)> = self
+                .conn
+                .query_row(
+                    "SELECT title, kind FROM files WHERE path = ?1",
+                    params![path],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| CoreError::Index(e.to_string()))?;
+            let Some((title, kind)) = row else { continue };
+            let Ok(vp) = VaultPath::new(path) else { continue };
+            nodes.push(GraphNode {
+                path: vp,
+                title,
+                kind: match kind.as_str() {
+                    "note" => FileKind::Note,
+                    "database" => FileKind::Database,
+                    "canvas" => FileKind::Canvas,
+                    _ => FileKind::Other,
+                },
+            });
+        }
+        nodes.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
+
+        let node_paths: std::collections::HashSet<&str> =
+            nodes.iter().map(|n| n.path.as_str()).collect();
+        let mut edges: Vec<GraphEdge> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (s, t) in &all_edges {
+            if node_paths.contains(s.as_str()) && node_paths.contains(t.as_str()) {
+                let key = format!("{s}→{t}");
+                if !seen.insert(key) {
+                    continue;
+                }
+                let (Ok(sp), Ok(tp)) = (VaultPath::new(s), VaultPath::new(t)) else {
+                    continue;
+                };
+                edges.push(GraphEdge {
+                    source: sp,
+                    target: tp,
+                });
+            }
+        }
+        Ok(Graph { nodes, edges })
+    }
+
     /// Resolve a wiki-link target the same way link indexing does; used by
     /// the editor for `[[` autocomplete and click-through.
     pub fn resolve_wiki(&self, name: &str) -> Result<Option<VaultPath>> {
@@ -656,24 +772,56 @@ fn index_one(
             return Ok(());
         }
         FileKind::Database => {
-            // Title from JSON "title" field when parseable; else file stem.
-            let title = vault
+            // Row text goes into FTS so search reaches structured data
+            // (FR-SRCH-002). Unparseable JSON degrades to stem-only.
+            let (title, body) = vault
                 .read_text(path)
                 .ok()
-                .and_then(|(content, _)| {
-                    serde_json::from_str::<serde_json::Value>(&content)
-                        .ok()
-                        .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(String::from))
+                .and_then(|(content, _)| mica_db::Database::parse(&content).ok())
+                .map(|db| {
+                    let body = db
+                        .rows
+                        .iter()
+                        .map(|r| db.row_text(r))
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (db.title.clone(), body)
                 })
-                .unwrap_or_else(|| path.stem().to_string());
+                .unwrap_or_else(|| (path.stem().to_string(), String::new()));
+            if !body.is_empty() || !title.is_empty() {
+                tx.execute(
+                    "INSERT INTO notes_fts(title, body, tags, path) VALUES (?1,?2,'',?3)",
+                    params![title, body, path.as_str()],
+                )
+                .map_err(|e| CoreError::Index(e.to_string()))?;
+            }
             (title, None::<String>, String::new(), ContentHash::of(&[]))
         }
-        FileKind::Canvas => (
-            path.stem().to_string(),
-            None::<String>,
-            String::new(),
-            ContentHash::of(&[]),
-        ),
+        FileKind::Canvas => {
+            // Cell labels are searchable too (FR-SRCH-002).
+            let body = vault
+                .read_text(path)
+                .ok()
+                .and_then(|(content, _)| mica_drawio::Scene::parse(&content).ok())
+                .map(|scene| {
+                    scene
+                        .cells
+                        .iter()
+                        .map(|c| c.label.trim())
+                        .filter(|l| !l.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            let title = path.stem().to_string();
+            tx.execute(
+                "INSERT INTO notes_fts(title, body, tags, path) VALUES (?1,?2,'',?3)",
+                params![title, body, path.as_str()],
+            )
+            .map_err(|e| CoreError::Index(e.to_string()))?;
+            (title, None::<String>, String::new(), ContentHash::of(&[]))
+        }
         _ => (
             path.file_name().to_string(),
             None::<String>,
@@ -792,6 +940,60 @@ mod tests {
         index.rebuild(&vault).unwrap();
         let hits = index.quick_switch("plan", 10).unwrap();
         assert_eq!(hits[0].title, "Plan");
+    }
+
+    #[test]
+    fn db_rows_and_canvas_labels_searchable() {
+        let (_dir, vault, mut index) = setup();
+        // Database with one row.
+        let mut db = mica_db::Database::new("Ops Tasks");
+        let mut cells = std::collections::BTreeMap::new();
+        cells.insert("prop_title".to_string(), serde_json::json!("Refill the flux capacitor"));
+        mica_db::apply_ops(&mut db, &[mica_db::DbOp::RowCreate { cells }]).unwrap();
+        vault
+            .write_text(
+                &VaultPath::new("databases/ops.database.json").unwrap(),
+                &db.serialize().unwrap(),
+            )
+            .unwrap();
+        // Canvas with one labelled shape.
+        let mut scene = mica_drawio::Scene::new("Map");
+        mica_drawio::apply_canvas_ops(
+            &mut scene,
+            &[mica_drawio::CanvasOp::AddCell {
+                cell: mica_drawio::SceneCell {
+                    id: "s1".into(),
+                    kind: mica_drawio::CellKind::Rectangle,
+                    label: "Zeppelin hangar".into(),
+                    geometry: Some(mica_drawio::Geometry {
+                        x: 0.0,
+                        y: 0.0,
+                        width: 100.0,
+                        height: 50.0,
+                    }),
+                    parent: None,
+                    source: None,
+                    target: None,
+                    style: None,
+                    href: None,
+                    view: None,
+                },
+            }],
+        )
+        .unwrap();
+        vault
+            .write_text(
+                &VaultPath::new("canvases/map.drawio").unwrap(),
+                &scene.serialize().unwrap(),
+            )
+            .unwrap();
+
+        index.rebuild(&vault).unwrap();
+
+        let hits = index.search("flux capacitor", 10).unwrap();
+        assert!(hits.iter().any(|h| h.path.as_str() == "databases/ops.database.json"));
+        let hits = index.search("zeppelin", 10).unwrap();
+        assert!(hits.iter().any(|h| h.path.as_str() == "canvases/map.drawio"));
     }
 
     #[test]

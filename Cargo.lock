@@ -2169,6 +2169,7 @@ dependencies = [
  "mica-core",
  "quick-xml 0.37.5",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 
@@ -2189,6 +2190,8 @@ name = "mica-search"
 version = "0.1.0"
 dependencies = [
  "mica-core",
+ "mica-db",
+ "mica-drawio",
  "mica-markdown",
  "mica-vault",
  "rusqlite",

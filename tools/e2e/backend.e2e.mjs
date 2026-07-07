@@ -2,7 +2,9 @@
 // and exercises the MVP critical path with real IPC + real files on disk.
 import fs from "node:fs";
 
-const VAULT = "C:/Users/Administrator/Documents/mica-test-vault";
+const VAULT =
+  process.env.MICA_E2E_VAULT ??
+  `${process.env.USERPROFILE?.replace(/\\/g, "/")}/Documents/mica-test-vault`;
 const CDP_LIST = "http://127.0.0.1:9223/json";
 
 const pages = await (await fetch(CDP_LIST)).json();
@@ -236,6 +238,42 @@ try {
   // 15. Index rebuild from files
   const count = await evalJs(`window.__mica.api.indexRebuild()`);
   check("index_rebuild processes files", typeof count === "number" && count >= 4, String(count));
+
+  // 16. Duplicate: fresh ULID, content otherwise preserved
+  const dup = await evalJs(`window.__mica.api.noteDuplicate(${JSON.stringify(created.path)})`);
+  check("note_duplicate creates copy", dup.path !== created.path && fs.existsSync(`${VAULT}/${dup.path}`), dup.path);
+  const dupContent = fs.readFileSync(`${VAULT}/${dup.path}`, "utf8");
+  const origId = fs.readFileSync(absCreated, "utf8").match(/^id: (note_\S+)/m)?.[1];
+  const dupId = dupContent.match(/^id: (note_\S+)/m)?.[1];
+  check("duplicate has fresh id", !!dupId && dupId !== origId, `${origId} vs ${dupId}`);
+  check("duplicate keeps body", dupContent.includes("Edited by the e2e driver"));
+
+  // 17. Backup snapshot
+  const backup = await evalJs(`window.__mica.api.vaultBackup()`);
+  check("vault_backup returns folder + files", typeof backup.folder === "string" && backup.files >= 4, JSON.stringify(backup));
+  check("backup folder on disk", fs.existsSync(`${VAULT}/.workspace/backups/${backup.folder}`) || fs.existsSync(backup.folder), backup.folder);
+
+  // 18. Rename rewrites relative links in referrers
+  const renamed = await evalJs(
+    `window.__mica.api.noteRename(${JSON.stringify(created.path)}, "notes/e2e-note-renamed.md")`,
+  );
+  check("note_rename returns new path", renamed === "notes/e2e-note-renamed.md", String(renamed));
+  check("renamed file on disk", fs.existsSync(`${VAULT}/notes/e2e-note-renamed.md`) && !fs.existsSync(absCreated));
+  await sleep(400);
+  const backlinksAfter = await evalJs(`window.__mica.api.backlinks("notes/roadmap.md")`);
+  check(
+    "backlinks track renamed source",
+    backlinksAfter.some((b) => b.source === "notes/e2e-note-renamed.md"),
+    JSON.stringify(backlinksAfter.map((b) => b.source)),
+  );
+
+  // 19. asset_save stores decoded bytes under assets/images
+  const pngB64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const assetPath = await evalJs(`window.__mica.api.assetSave("e2e pixel.png", ${JSON.stringify(pngB64)})`);
+  check("asset_save path under assets/images", /^assets\/images\/.+\.png$/.test(assetPath), String(assetPath));
+  const assetBytes = fs.readFileSync(`${VAULT}/${assetPath}`);
+  check("asset bytes round-trip", assetBytes.length === Buffer.from(pngB64, "base64").length && assetBytes[0] === 0x89);
 } catch (e) {
   check("script completed", false, String(e.message ?? e));
 }

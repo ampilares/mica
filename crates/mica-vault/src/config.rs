@@ -19,6 +19,10 @@ pub struct VaultConfig {
     pub canvases_dir: String,
     #[serde(default = "default_assets_dir")]
     pub assets_dir: String,
+    /// File naming strategy for new notes: "slug" (kebab-case) or "title"
+    /// (the title verbatim, minus characters invalid in file names).
+    #[serde(default = "default_naming")]
+    pub naming: String,
     /// Unknown keys survive round-trips so newer app versions don't lose data.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,
@@ -36,6 +40,9 @@ fn default_canvases_dir() -> String {
 fn default_assets_dir() -> String {
     "assets".into()
 }
+fn default_naming() -> String {
+    "slug".into()
+}
 
 impl VaultConfig {
     pub fn new(name: impl Into<String>) -> Self {
@@ -46,6 +53,7 @@ impl VaultConfig {
             databases_dir: default_databases_dir(),
             canvases_dir: default_canvases_dir(),
             assets_dir: default_assets_dir(),
+            naming: default_naming(),
             extra: serde_json::Map::new(),
         }
     }

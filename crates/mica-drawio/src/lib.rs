@@ -3,6 +3,8 @@
 //! app-specific data rides in `data-workspace-*` attributes so draw.io still
 //! renders a labeled shape.
 
+pub mod interop;
+
 use quick_xml::escape::{escape, unescape};
 use serde::{Deserialize, Serialize};
 

@@ -25,6 +25,10 @@ interface AppStore {
   rightPanelOpen: boolean;
   dataExplainerOpen: boolean;
   saveStatus: "idle" | "saving" | "saved" | "error";
+  /** Per-note raw Markdown source mode (FR-NOTE-009). */
+  sourceMode: Record<string, boolean>;
+  settingsOpen: boolean;
+  graphOpen: boolean;
 
   setVault: (v: VaultInfo | null) => void;
   refreshTree: () => Promise<void>;
@@ -39,6 +43,9 @@ interface AppStore {
   setRightPanelOpen: (open: boolean) => void;
   setDataExplainerOpen: (open: boolean) => void;
   setSaveStatus: (s: AppStore["saveStatus"]) => void;
+  toggleSourceMode: (path: string) => void;
+  setSettingsOpen: (open: boolean) => void;
+  setGraphOpen: (open: boolean) => void;
 }
 
 export const useStore = create<AppStore>((set, get) => ({
@@ -53,6 +60,9 @@ export const useStore = create<AppStore>((set, get) => ({
   rightPanelOpen: true,
   dataExplainerOpen: false,
   saveStatus: "idle",
+  sourceMode: {},
+  settingsOpen: false,
+  graphOpen: false,
 
   setVault: (vault) => set({ vault, tabs: [], activePath: null, tree: null }),
 
@@ -103,6 +113,10 @@ export const useStore = create<AppStore>((set, get) => ({
   setRightPanelOpen: (rightPanelOpen) => set({ rightPanelOpen }),
   setDataExplainerOpen: (dataExplainerOpen) => set({ dataExplainerOpen }),
   setSaveStatus: (saveStatus) => set({ saveStatus }),
+  toggleSourceMode: (path) =>
+    set((s) => ({ sourceMode: { ...s.sourceMode, [path]: !s.sourceMode[path] } })),
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setGraphOpen: (graphOpen) => set({ graphOpen }),
 }));
 
 export function kindOfPath(path: string): FileKind {

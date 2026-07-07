@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
 use mica_core::{ContentHash, CoreError, Result, VaultPath, WORKSPACE_DIR};
 
@@ -12,7 +13,7 @@ use crate::tree::{FileKind, FileNode, FileTree};
 #[derive(Debug)]
 pub struct Vault {
     root: PathBuf,
-    config: VaultConfig,
+    config: RwLock<VaultConfig>,
 }
 
 impl Vault {
@@ -79,7 +80,10 @@ impl Vault {
                     .unwrap_or_else(|| "Vault".to_string()),
             )
         };
-        Ok(Vault { root, config })
+        Ok(Vault {
+            root,
+            config: RwLock::new(config),
+        })
     }
 
     /// Whether `root` (or an ancestor) already contains a vault marker.
@@ -98,8 +102,20 @@ impl Vault {
         &self.root
     }
 
-    pub fn config(&self) -> &VaultConfig {
-        &self.config
+    pub fn config(&self) -> VaultConfig {
+        self.config.read().unwrap().clone()
+    }
+
+    /// Persist new vault settings to `.workspace/config.json` (atomic) and
+    /// apply them to this open vault immediately.
+    pub fn set_config(&self, new: VaultConfig) -> Result<()> {
+        let config_path = self.root.join(WORKSPACE_DIR).join("config.json");
+        let mut bytes = serde_json::to_vec_pretty(&new)
+            .map_err(|e| CoreError::Serialize(e.to_string()))?;
+        bytes.push(b'\n');
+        atomic_write(&config_path, &bytes)?;
+        *self.config.write().unwrap() = new;
+        Ok(())
     }
 
     pub fn abs(&self, path: &VaultPath) -> PathBuf {

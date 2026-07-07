@@ -1,7 +1,9 @@
 // UI-layer e2e: drives the React app through the store and verifies the DOM.
 import fs from "node:fs";
 
-const VAULT = "C:/Users/Administrator/Documents/mica-test-vault";
+const VAULT =
+  process.env.MICA_E2E_VAULT ??
+  `${process.env.USERPROFILE?.replace(/\\/g, "/")}/Documents/mica-test-vault`;
 const pages = await (await fetch("http://127.0.0.1:9223/json")).json();
 const page = pages.find((p) => p.type === "page");
 const ws = new WebSocket(page.webSocketDebuggerUrl);
