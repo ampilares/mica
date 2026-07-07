@@ -261,7 +261,7 @@ From PRD Phases 3–4 and post-MVP scope, in rough order:
 - Gallery database view; formula/rollup properties; database relations.
 - Presentation mode from canvas frames (FR-CAN-009).
 - Git integration (commit/diff/pull/push in-app) — decision point per PRD open question 7.
-- Plugin API design + sandbox model (NFR-SEC-005 gate before any third-party plugins).
+- Plugin API design + sandbox model (NFR-SEC-005 gate before any third-party plugins) — expanded into the [plugin marketplace & monetization plan](plugin-marketplace.md) (phases M0–M4).
 - AFFiNE import/export exploration (Obsidian Canvas and Excalidraw moved into Phase 6).
 - Sharded database row format for very large databases (migration path per spec §16).
 - **1.0 hardening:** stable file-format guarantee + published format docs, migration tools, external security review, full accessibility audit, signed auto-update.
