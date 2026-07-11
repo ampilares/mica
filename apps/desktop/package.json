@@ -18,6 +18,8 @@
     "@codemirror/view": "^6.43.6",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
+    "@tiptap/core": "^2.27.2",
+    "@tiptap/extension-code-block": "^2.27.2",
     "@tiptap/extension-image": "^2.27.0",
     "@tiptap/extension-link": "^2.27.0",
     "@tiptap/extension-placeholder": "^2.27.0",

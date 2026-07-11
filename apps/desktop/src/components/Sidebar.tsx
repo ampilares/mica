@@ -48,24 +48,18 @@ export default function Sidebar() {
   return (
     <div className="sidebar">
       <div className="sidebar-header">
-        <span className="vault-name" title={vault?.root}>
-          {vault?.name}
-        </span>
+        <div>
+          <span className="sidebar-eyebrow">Vault</span>
+          <span className="vault-name" title={vault?.root}>{vault?.name}</span>
+        </div>
+        <button className="icon-button" title="Quick switcher (Ctrl+P)" onClick={() => useStore.getState().setQuickSwitcherOpen(true)}>⌕</button>
       </div>
       <div className="sidebar-actions">
-        <button title="New note" onClick={createNote}>
-          + Note
-        </button>
-        <button title="New database" onClick={createDatabase}>
-          + DB
-        </button>
-        <button title="New canvas" onClick={createCanvas}>
-          + Canvas
-        </button>
-        <button title="Search (Ctrl+Shift+F)" onClick={() => setSearchOpen(true)}>
-          🔍
-        </button>
+        <button title="New note" onClick={createNote}>＋ Note</button>
+        <button title="New database" onClick={createDatabase}>＋ Database</button>
+        <button title="New canvas" onClick={createCanvas}>＋ Canvas</button>
       </div>
+      <div className="sidebar-label"><span>Files</span><button title="Search" onClick={() => setSearchOpen(true)}>⌕</button></div>
       <div className="file-tree">
         {tree?.roots.map((node) => <TreeNode key={node.path} node={node} depth={0} />)}
       </div>

@@ -2,12 +2,17 @@ import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, isApiError } from "../api";
 import { useStore } from "../store";
+import { useSettings } from "../settings";
 
 export default function Onboarding() {
   const setVault = useStore((s) => s.setVault);
   const refreshTree = useStore((s) => s.refreshTree);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const settings = useSettings();
+  const dark = settings.theme === "system"
+    ? !window.matchMedia("(prefers-color-scheme: light)").matches
+    : settings.theme === "dark";
 
   const pickAnd = async (action: "create" | "open") => {
     setError(null);
@@ -28,7 +33,11 @@ export default function Onboarding() {
 
   return (
     <div className="onboarding">
+      <button className="onboarding-theme" onClick={() => settings.set({ theme: dark ? "light" : "dark" })}>
+        {dark ? "☀ Light" : "☾ Dark"}
+      </button>
       <div className="onboarding-card">
+        <div className="empty-mark onboarding-mark">M</div>
         <h1>Mica</h1>
         <p className="muted">
           A local-first workspace. Your notes are Markdown files, your databases

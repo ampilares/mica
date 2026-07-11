@@ -11,6 +11,7 @@ export default function SettingsDialog() {
 
   const [config, setConfig] = useState<VaultConfig | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [section, setSection] = useState<"appearance" | "editor" | "vault">("appearance");
 
   useEffect(() => {
     if (open) {
@@ -19,6 +20,7 @@ export default function SettingsDialog() {
         .then(setConfig)
         .catch(() => setConfig(null));
       setSaveError(null);
+      setSection("appearance");
     }
   }, [open]);
 
@@ -38,18 +40,26 @@ export default function SettingsDialog() {
 
   return (
     <div className="modal-backdrop" onClick={() => setOpen(false)}>
-      <div className="modal settings" onClick={(e) => e.stopPropagation()}>
+      <div className="modal settings" role="dialog" aria-modal="true" aria-label="Settings" onClick={(e) => e.stopPropagation()}>
         <div className="settings-header">
-          <h3>Settings</h3>
+          <div><span className="settings-kicker">Mica</span><h3>Settings</h3></div>
           <button className="small" onClick={() => setOpen(false)}>
             ✕
           </button>
         </div>
-
-        <section>
-          <h4>Appearance</h4>
+        <div className="settings-layout">
+          <nav className="settings-nav" aria-label="Settings categories">
+            <span>Options</span>
+            <button className={section === "appearance" ? "active" : ""} onClick={() => setSection("appearance")}>◐ <span>Appearance</span></button>
+            <button className={section === "editor" ? "active" : ""} onClick={() => setSection("editor")}>✎ <span>Editor</span></button>
+            <button className={section === "vault" ? "active" : ""} onClick={() => setSection("vault")}>▱ <span>Vault</span></button>
+            <div className="settings-nav-note">Preferences are saved automatically.</div>
+          </nav>
+          <div className="settings-content">
+        {section === "appearance" && <section>
+          <div className="settings-section-title"><h4>Appearance</h4><p>Choose how Mica looks and feels.</p></div>
           <label className="settings-row">
-            <span>Theme</span>
+            <span><strong>Color scheme</strong><small>Use a light, dark, or system-matched interface.</small></span>
             <select
               value={settings.theme}
               onChange={(e) => settings.set({ theme: e.target.value as "dark" | "light" | "system" })}
@@ -60,7 +70,14 @@ export default function SettingsDialog() {
             </select>
           </label>
           <label className="settings-row">
-            <span>Interface font</span>
+            <span><strong>Accent color</strong><small>Used for selection, links, toggles, and focus.</small></span>
+            <div className="color-control">
+              <input type="color" aria-label="Accent color" value={settings.accentColor} onChange={(e) => settings.set({ accentColor: e.target.value })} />
+              <input value={settings.accentColor} readOnly aria-label="Accent color hex value" />
+            </div>
+          </label>
+          <label className="settings-row">
+            <span><strong>Interface font</strong><small>Set the base font for Mica's controls.</small></span>
             <input
               placeholder="System default"
               value={settings.uiFont}
@@ -68,7 +85,7 @@ export default function SettingsDialog() {
             />
           </label>
           <label className="settings-row">
-            <span>Editor font</span>
+            <span><strong>Editor font</strong><small>Leave blank to follow the interface font.</small></span>
             <input
               placeholder="Same as interface"
               value={settings.editorFont}
@@ -76,7 +93,7 @@ export default function SettingsDialog() {
             />
           </label>
           <label className="settings-row">
-            <span>Editor font size</span>
+            <span><strong>Editor font size</strong><small>Text size in editing and reading views.</small></span>
             <input
               type="number"
               min={11}
@@ -85,12 +102,12 @@ export default function SettingsDialog() {
               onChange={(e) => settings.set({ editorFontSize: Number(e.target.value) || 14 })}
             />
           </label>
-        </section>
+        </section>}
 
-        <section>
-          <h4>Editing</h4>
+        {section === "editor" && <section>
+          <div className="settings-section-title"><h4>Editor</h4><p>Control writing and save behavior.</p></div>
           <label className="settings-row">
-            <span>Autosave delay (ms)</span>
+            <span><strong>Autosave delay</strong><small>How long Mica waits after typing before saving.</small></span>
             <input
               type="number"
               min={250}
@@ -100,14 +117,15 @@ export default function SettingsDialog() {
               onChange={(e) => settings.set({ autosaveDelay: Number(e.target.value) || 1000 })}
             />
           </label>
-        </section>
+          <div className="settings-tip"><strong>Markdown-first.</strong> Use Ctrl+E in any note to switch between rich and source editing.</div>
+        </section>}
 
-        <section>
-          <h4>Vault</h4>
+        {section === "vault" && <section>
+          <div className="settings-section-title"><h4>Vault</h4><p>Configure storage, attachments, and naming.</p></div>
           {config ? (
             <>
               <label className="settings-row">
-                <span>Vault name</span>
+                <span><strong>Vault name</strong><small>Shown at the top of the file explorer.</small></span>
                 <input
                   value={config.name}
                   onChange={(e) => setConfig({ ...config, name: e.target.value })}
@@ -115,7 +133,7 @@ export default function SettingsDialog() {
                 />
               </label>
               <label className="settings-row">
-                <span>Attachments folder</span>
+                <span><strong>Attachments folder</strong><small>Where images and linked files are stored.</small></span>
                 <input
                   value={config.assets_dir}
                   onChange={(e) => setConfig({ ...config, assets_dir: e.target.value })}
@@ -123,7 +141,7 @@ export default function SettingsDialog() {
                 />
               </label>
               <label className="settings-row">
-                <span>New notes folder</span>
+                <span><strong>New notes folder</strong><small>Default location for newly created notes.</small></span>
                 <input
                   value={config.notes_dir}
                   onChange={(e) => setConfig({ ...config, notes_dir: e.target.value })}
@@ -131,7 +149,7 @@ export default function SettingsDialog() {
                 />
               </label>
               <label className="settings-row">
-                <span>New note file names</span>
+                <span><strong>New note file names</strong><small>Choose readable titles or URL-friendly slugs.</small></span>
                 <select
                   value={config.naming}
                   onChange={(e) => void patchConfig({ naming: e.target.value })}
@@ -145,7 +163,9 @@ export default function SettingsDialog() {
           ) : (
             <div className="muted small">Vault settings unavailable.</div>
           )}
-        </section>
+        </section>}
+          </div>
+        </div>
       </div>
     </div>
   );

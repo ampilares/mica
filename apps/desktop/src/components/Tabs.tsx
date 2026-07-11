@@ -29,6 +29,9 @@ export default function Tabs() {
           </button>
         </div>
       ))}
+      <button className="new-tab" title="Quick switcher" onClick={() => useStore.getState().setQuickSwitcherOpen(true)}>＋</button>
+      <div className="tab-spacer" />
+      <button className="tabs-command" title="Command palette (Ctrl+K)" onClick={() => useStore.getState().setCommandPaletteOpen(true)}>⌘</button>
     </div>
   );
 }

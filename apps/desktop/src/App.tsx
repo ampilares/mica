@@ -18,6 +18,7 @@ import RightPanel from "./components/RightPanel";
 import DataExplainer from "./components/DataExplainer";
 import SettingsDialog from "./components/SettingsDialog";
 import GraphPanel from "./components/GraphPanel";
+import ActivityRail from "./components/ActivityRail";
 import { docEvents } from "./docEvents";
 import { useSettings, applySettings } from "./settings";
 
@@ -95,6 +96,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <ActivityRail />
       <Sidebar />
       <div className="main">
         <Tabs />
@@ -122,11 +124,14 @@ export default function App() {
             );
           })}
           {tabs.length === 0 && (
-            <div className="placeholder">
-              <h2>Mica</h2>
-              <p className="muted">
-                Create a note from the sidebar, or press Ctrl+P to open something.
-              </p>
+            <div className="placeholder empty-workspace">
+              <div className="empty-mark">M</div>
+              <h2>Your workspace is ready</h2>
+              <p className="muted">Open a file from the sidebar or start with a quick action.</p>
+              <div className="empty-actions">
+                <button onClick={() => setQuickSwitcherOpen(true)}>Open a file <kbd>Ctrl P</kbd></button>
+                <button onClick={() => useStore.getState().setCommandPaletteOpen(true)}>Run a command <kbd>Ctrl K</kbd></button>
+              </div>
             </div>
           )}
         </div>

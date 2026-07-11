@@ -8,6 +8,7 @@ export interface AppSettings {
   uiFont: string;
   editorFont: string;
   editorFontSize: number;
+  accentColor: string;
   /** Autosave debounce in milliseconds. */
   autosaveDelay: number;
 
@@ -24,6 +25,7 @@ export const useSettings = create<AppSettings>()(
       uiFont: "",
       editorFont: "",
       editorFontSize: 14,
+      accentColor: "#8b5cf6",
       autosaveDelay: 1000,
       set: (patch) => set(patch),
     }),
@@ -47,4 +49,7 @@ export function applySettings(s: AppSettings) {
     s.editorFont || "var(--ui-font)",
   );
   root.style.setProperty("--editor-size", `${s.editorFontSize}px`);
+  root.style.setProperty("--accent", s.accentColor || "#8b5cf6");
+  root.style.setProperty("--accent-soft", `${s.accentColor || "#8b5cf6"}24`);
+  root.style.setProperty("--mark-bg", `${s.accentColor || "#8b5cf6"}40`);
 }
