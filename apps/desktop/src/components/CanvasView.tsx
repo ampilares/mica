@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { api, CanvasOp, CellKind, Scene, SceneCell, isApiError } from "../api";
 import { docEvents } from "../docEvents";
-import { useStore, kindOfPath, titleOfPath } from "../store";
+import { useStore } from "../store";
+import { resourceViewForPath, titleForPath } from "../workspace";
 import { relativeTo } from "../editor/paths";
+import type { CanvasViewLocation, CanvasViewport } from "../workspace";
 
 type Tool =
   | "select"
@@ -101,14 +103,23 @@ function ExportMenu({
   );
 }
 
-export default function CanvasView({ path, active }: { path: string; active: boolean }) {
+export interface CanvasViewProps {
+  path: string;
+  active: boolean;
+  location?: CanvasViewLocation["canvas"];
+  onLocationChange?: (viewport: CanvasViewport, selectedIds: string[]) => void;
+}
+
+export default function CanvasView({ path, active, location, onLocationChange }: CanvasViewProps) {
   const [scene, setScene] = useState<Scene | null>(null);
   const [version, setVersion] = useState("");
   const [tool, setTool] = useState<Tool>("select");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(location?.selectedIds ?? []));
   const [error, setError] = useState<string | null>(null);
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
-  const [viewBox, setViewBox] = useState({ x: -100, y: -100, zoom: 1 });
+  const [viewBox, setViewBox] = useState<CanvasViewport>(
+    () => location?.viewport ?? { x: -100, y: -100, zoom: 1 },
+  );
   const [editingLabel, setEditingLabel] = useState<string | null>(null);
   const [marquee, setMarquee] = useState<Marquee | null>(null);
 
@@ -121,6 +132,32 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   sceneRef.current = scene;
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  const restoreRef = useRef(location);
+
+  useEffect(() => {
+    if (!location) return;
+    restoreRef.current = location;
+    setViewBox(location.viewport);
+    setSelected(new Set(location.selectedIds));
+  }, [location]);
+
+  useEffect(() => {
+    if (!active || !onLocationChange) return;
+    const restoring = restoreRef.current;
+    if (restoring) {
+      const sameViewport = restoring.viewport.x === viewBox.x
+        && restoring.viewport.y === viewBox.y
+        && restoring.viewport.zoom === viewBox.zoom;
+      const sameSelection = restoring.selectedIds.length === selected.size
+        && restoring.selectedIds.every((id) => selected.has(id));
+      if (!sameViewport || !sameSelection) return;
+      restoreRef.current = undefined;
+    }
+    const timeout = window.setTimeout(() => {
+      onLocationChange(viewBox, [...selected]);
+    }, 120);
+    return () => window.clearTimeout(timeout);
+  }, [active, onLocationChange, selected, viewBox]);
 
   const dragState = useRef<{
     mode: "move" | "pan" | "resize" | "marquee";
@@ -134,7 +171,7 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     moved?: boolean;
   } | null>(null);
 
-  const openTab = useStore((s) => s.openTab);
+  const openResource = useStore((s) => s.openWorkspaceResource);
 
   const load = useCallback(async () => {
     try {
@@ -511,7 +548,7 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   };
 
   const exportCanvas = async (format: "svg" | "png" | "obsidian" | "excalidraw") => {
-    const stem = titleOfPath(pathRef.current);
+    const stem = titleForPath(pathRef.current);
     if (format === "obsidian" || format === "excalidraw") {
       const ext = format === "obsidian" ? "canvas" : "excalidraw";
       const dest = await saveDialog({
@@ -565,10 +602,8 @@ export default function CanvasView({ path, active }: { path: string; active: boo
         else if (seg !== "." && seg !== "") parts.push(seg);
       }
       const target = parts.join("/");
-      const kind = kindOfPath(target);
-      if (kind === "note" || kind === "database") {
-        openTab({ path: target, kind, title: titleOfPath(target) });
-      }
+      const view = resourceViewForPath(target);
+      if (view.type === "note" || view.type === "database") void openResource(view);
       return;
     }
     setEditingLabel(cell.id);
@@ -652,15 +687,15 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     const dropped = e.dataTransfer.getData("application/x-mica-path");
     if (!dropped) return;
     e.preventDefault();
-    const kind = kindOfPath(dropped);
-    if (kind !== "note" && kind !== "database") return;
+    const view = resourceViewForPath(dropped);
+    if (view.type !== "note" && view.type !== "database") return;
     const { x, y } = toWorld(e.clientX, e.clientY);
     const cell: SceneCell = {
       id: newCellId(),
-      kind: kind === "note" ? "note_link" : "database_link",
-      label: titleOfPath(dropped),
+      kind: view.type === "note" ? "note_link" : "database_link",
+      label: titleForPath(dropped),
       href: relativeTo(pathRef.current, dropped),
-      view: kind === "database" ? "table_default" : undefined,
+      view: view.type === "database" ? "table_default" : undefined,
       geometry: { x: Math.round(x - 100), y: Math.round(y - 45), width: 200, height: 90 },
     };
     void apply([{ op: "add_cell", cell }]);

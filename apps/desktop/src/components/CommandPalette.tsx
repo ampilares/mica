@@ -1,7 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
-import { useStore, titleOfPath } from "../store";
+import { useStore } from "../store";
+import {
+  DEFAULT_WORKSPACE_WINDOW_ID,
+  deleteWorkspacePreset,
+  flushWorkspacePersistence,
+  listWorkspacePresets,
+  loadWorkspacePreset,
+  parseWorkspaceWindowStartup,
+  resourcePath,
+  resourceViewForPath,
+  saveWorkspacePreset,
+  selectAllPaneIds,
+  titleForPath,
+} from "../workspace";
+import { resetDocumentSessions } from "../documents";
 
 interface Command {
   id: string;
@@ -11,11 +25,17 @@ interface Command {
 }
 
 export default function CommandPalette() {
+  const workspaceWindowId = parseWorkspaceWindowStartup(window.location.search).windowId
+    ?? DEFAULT_WORKSPACE_WINDOW_ID;
   const isOpen = useStore((s) => s.commandPaletteOpen);
   const setOpen = useStore((s) => s.setCommandPaletteOpen);
   const refreshTree = useStore((s) => s.refreshTree);
-  const openTab = useStore((s) => s.openTab);
-  const activePath = useStore((s) => s.activePath);
+  const openResource = useStore((s) => s.openWorkspaceResource);
+  const activeTab = useStore((s) => {
+    const pane = s.workspace.panes[s.workspace.focusedPaneId];
+    return pane ? s.workspace.tabs[pane.activeTabId] : undefined;
+  });
+  const activeResourcePath = activeTab ? resourcePath(activeTab.view) : undefined;
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
   const [status, setStatus] = useState<string | null>(null);
@@ -34,6 +54,44 @@ export default function CommandPalette() {
 
   const commands: Command[] = [
     {
+      id: "new-tab",
+      label: "New tab",
+      hint: "Ctrl+T",
+      run: () => {
+        const state = useStore.getState();
+        state.createWorkspaceTab(state.workspace.focusedPaneId);
+      },
+    },
+    {
+      id: "split-right",
+      label: "Split pane right",
+      hint: "Ctrl+\\",
+      run: () => {
+        const state = useStore.getState();
+        state.splitWorkspacePane(state.workspace.focusedPaneId, { direction: "row" });
+      },
+    },
+    {
+      id: "split-down",
+      label: "Split pane down",
+      run: () => {
+        const state = useStore.getState();
+        state.splitWorkspacePane(state.workspace.focusedPaneId, { direction: "column" });
+      },
+    },
+    {
+      id: "focus-next-pane",
+      label: "Focus next pane",
+      hint: "Ctrl+Alt+Shift+→",
+      run: () => focusRelativePane(1),
+    },
+    {
+      id: "focus-previous-pane",
+      label: "Focus previous pane",
+      hint: "Ctrl+Alt+Shift+←",
+      run: () => focusRelativePane(-1),
+    },
+    {
       id: "new-note",
       label: "New note",
       run: async () => {
@@ -41,7 +99,7 @@ export default function CommandPalette() {
         if (!title) return;
         const file = await api.noteCreate(title);
         await refreshTree();
-        openTab({ path: file.path, kind: "note", title: titleOfPath(file.path) });
+        await openResource(resourceViewForPath(file.path));
       },
     },
     {
@@ -52,7 +110,7 @@ export default function CommandPalette() {
         if (!title) return;
         const file = await api.dbCreate(title);
         await refreshTree();
-        openTab({ path: file.path, kind: "database", title: titleOfPath(file.path) });
+        await openResource(resourceViewForPath(file.path));
       },
     },
     {
@@ -63,7 +121,7 @@ export default function CommandPalette() {
         if (!title) return;
         const file = await api.canvasCreate(title);
         await refreshTree();
-        openTab({ path: file.path, kind: "canvas", title: titleOfPath(file.path) });
+        await openResource(resourceViewForPath(file.path));
       },
     },
     {
@@ -84,13 +142,13 @@ export default function CommandPalette() {
       hint: "outline · backlinks",
       run: () => useStore.getState().setRightPanelOpen(!useStore.getState().rightPanelOpen),
     },
-    ...(activePath?.endsWith(".md")
+    ...(activeTab?.view.type === "note"
       ? [
           {
             id: "toggle-source",
             label: "Toggle Markdown source mode",
             hint: "Ctrl+E",
-            run: () => useStore.getState().toggleSourceMode(activePath),
+            run: () => useStore.getState().toggleTabSourceMode(activeTab.id),
           },
         ]
       : []),
@@ -115,7 +173,7 @@ export default function CommandPalette() {
         if (typeof src !== "string") return;
         const file = await api.canvasImport(src);
         await refreshTree();
-        openTab({ path: file.path, kind: "canvas", title: titleOfPath(file.path) });
+        await openResource(resourceViewForPath(file.path));
       },
     },
     {
@@ -130,49 +188,41 @@ export default function CommandPalette() {
         setStatus(`Imported ${count} files`);
       },
     },
-    ...(activePath
+    ...(activeResourcePath
       ? [
           {
             id: "export-current",
-            label: `Export "${titleOfPath(activePath)}"…`,
+            label: `Export "${titleForPath(activeResourcePath)}"…`,
             run: async () => {
               const dest = await open({ directory: true, multiple: false, title: "Export destination" });
               if (typeof dest !== "string") return;
-              await api.vaultExport([activePath], dest);
+              await api.vaultExport([activeResourcePath], dest);
               setStatus("Exported.");
             },
           },
           {
             id: "duplicate-current",
-            label: `Duplicate "${titleOfPath(activePath)}"`,
+            label: `Duplicate "${titleForPath(activeResourcePath)}"`,
             run: async () => {
-              const file = await api.noteDuplicate(activePath);
+              const file = await api.noteDuplicate(activeResourcePath);
               await refreshTree();
-              openTab({
-                path: file.path,
-                kind: activePath.endsWith(".md")
-                  ? "note"
-                  : activePath.endsWith(".drawio")
-                    ? "canvas"
-                    : "database",
-                title: titleOfPath(file.path),
-              });
+              await openResource(resourceViewForPath(file.path));
             },
           },
           {
             id: "reveal-current",
             label: "Reveal current file in Explorer",
-            run: () => api.vaultReveal(activePath),
+            run: () => api.vaultReveal(activeResourcePath),
           },
           {
             id: "open-external",
             label: "Open current file in external editor",
-            run: () => api.vaultOpenExternal(activePath),
+            run: () => api.vaultOpenExternal(activeResourcePath),
           },
           {
             id: "copy-path",
             label: "Copy relative path",
-            run: () => navigator.clipboard.writeText(activePath),
+            run: () => navigator.clipboard.writeText(activeResourcePath),
           },
         ]
       : []),
@@ -188,7 +238,55 @@ export default function CommandPalette() {
       id: "graph",
       label: "Open graph view",
       hint: "Ctrl+G",
-      run: () => useStore.getState().setGraphOpen(true),
+      run: () => {
+        const state = useStore.getState();
+        const pane = state.workspace.panes[state.workspace.focusedPaneId];
+        const tab = state.workspace.tabs[pane.activeTabId];
+        state.createWorkspaceTab(pane.id, { type: "graph", centerPath: resourcePath(tab.view) });
+      },
+    },
+    {
+      id: "save-workspace-preset",
+      label: "Save workspace preset…",
+      run: async () => {
+        const name = prompt("Preset name", "Focus layout");
+        if (!name) return;
+        await saveWorkspacePreset(name, useStore.getState().workspace);
+        setStatus(`Saved workspace preset “${name}”`);
+      },
+    },
+    {
+      id: "load-workspace-preset",
+      label: "Load workspace preset…",
+      run: async () => {
+        const names = await listWorkspacePresets();
+        if (names.length === 0) {
+          setStatus("No workspace presets saved");
+          return;
+        }
+        const name = prompt(`Preset to load:\n${names.join("\n")}`, names[0]);
+        if (!name) return;
+        const workspace = await loadWorkspacePreset(name);
+        if (!workspace) throw new Error(`Workspace preset “${name}” was not found`);
+        const restored = await useStore.getState().restoreWorkspaceLayout(workspace);
+        if (!restored) throw new Error("Unsaved documents prevented the workspace from changing");
+        setStatus(`Loaded workspace preset “${name}”`);
+      },
+    },
+    {
+      id: "delete-workspace-preset",
+      label: "Delete workspace preset…",
+      run: async () => {
+        const names = await listWorkspacePresets();
+        if (names.length === 0) {
+          setStatus("No workspace presets saved");
+          return;
+        }
+        const name = prompt(`Preset to delete:\n${names.join("\n")}`, names[0]);
+        if (!name || !confirm(`Delete workspace preset “${name}”?`)) return;
+        const deleted = await deleteWorkspacePreset(name);
+        setStatus(deleted ? `Deleted workspace preset “${name}”` : `Preset “${name}” was not found`);
+      },
     },
     {
       id: "settings",
@@ -201,14 +299,20 @@ export default function CommandPalette() {
       label: "Where is my data?",
       run: () => useStore.getState().setDataExplainerOpen(true),
     },
-    {
-      id: "close-vault",
-      label: "Close vault",
-      run: async () => {
-        await api.vaultClose();
-        useStore.getState().setVault(null);
-      },
-    },
+    ...(workspaceWindowId === DEFAULT_WORKSPACE_WINDOW_ID
+      ? [{
+          id: "close-vault",
+          label: "Close vault",
+          run: async () => {
+            await flushWorkspacePersistence();
+            const documents = await resetDocumentSessions();
+            const failure = documents.find((result) => !result.ok || result.dirty);
+            if (failure) throw new Error(`Could not save ${failure.path}; vault remains open`);
+            await api.vaultClose();
+            useStore.getState().setVault(null);
+          },
+        }]
+      : []),
   ];
 
   const filtered = commands.filter((c) =>
@@ -220,7 +324,7 @@ export default function CommandPalette() {
     try {
       await cmd.run();
       // Commands that show status keep the palette open briefly.
-      if (!["backup", "rebuild-index", "import-folder", "export-current"].includes(cmd.id)) {
+      if (!["backup", "rebuild-index", "import-folder", "export-current", "save-workspace-preset", "load-workspace-preset", "delete-workspace-preset"].includes(cmd.id)) {
         setOpen(false);
       }
     } catch (e) {
@@ -270,4 +374,12 @@ export default function CommandPalette() {
       </div>
     </div>
   );
+}
+
+function focusRelativePane(delta: number) {
+  const state = useStore.getState();
+  const paneIds = selectAllPaneIds(state.workspace);
+  if (paneIds.length < 2) return;
+  const index = paneIds.indexOf(state.workspace.focusedPaneId);
+  state.activateWorkspacePane(paneIds[(index + delta + paneIds.length) % paneIds.length]);
 }

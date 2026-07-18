@@ -1,5 +1,12 @@
 // Typed wrappers around the Tauri command surface (spec §6).
 import { invoke } from "@tauri-apps/api/core";
+import {
+  DEFAULT_WORKSPACE_WINDOW_ID,
+  normalizeWorkspaceWindowCreateRequest,
+  type WorkspaceSnapshot,
+  type WorkspaceWindowCreateRequest,
+  type WorkspaceWindowCreateResponse,
+} from "./workspace";
 
 export interface ApiError {
   code: string;
@@ -241,6 +248,26 @@ export const api = {
   vaultTree: () => invoke<FileTree>("vault_tree"),
   vaultReveal: (path: string) => invoke<void>("vault_reveal", { path }),
   vaultOpenExternal: (path: string) => invoke<void>("vault_open_external", { path }),
+  vaultCurrent: () => invoke<VaultInfo | null>("vault_current"),
+  workspaceSnapshotRead: (windowId = DEFAULT_WORKSPACE_WINDOW_ID) =>
+    invoke<WorkspaceSnapshot | null>("workspace_snapshot_read", { windowId }),
+  workspaceSnapshotWrite: (
+    snapshot: WorkspaceSnapshot,
+    windowId = DEFAULT_WORKSPACE_WINDOW_ID,
+  ) => invoke<void>("workspace_snapshot_write", { snapshot, windowId }),
+  workspaceSnapshotWindowIds: () =>
+    invoke<string[]>("workspace_snapshot_window_ids"),
+  workspacePresetList: () => invoke<string[]>("workspace_preset_list"),
+  workspacePresetRead: (name: string) =>
+    invoke<WorkspaceSnapshot | null>("workspace_preset_read", { name }),
+  workspacePresetWrite: (name: string, snapshot: WorkspaceSnapshot) =>
+    invoke<void>("workspace_preset_write", { name, snapshot }),
+  workspacePresetDelete: (name: string) =>
+    invoke<boolean>("workspace_preset_delete", { name }),
+  workspaceWindowCreate: (request: WorkspaceWindowCreateRequest = {}) =>
+    invoke<WorkspaceWindowCreateResponse>("workspace_window_create", {
+      request: normalizeWorkspaceWindowCreateRequest(request),
+    }),
 
   noteCreate: (title: string, dir?: string) =>
     invoke<LoadedFile>("note_create", { title, dir }),

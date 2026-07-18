@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capabilities for the main window",
-  "windows": ["main"],
+  "description": "Default capabilities for Mica workspace windows",
+  "windows": ["main", "mica-workspace-*"],
   "permissions": [
     "core:default",
     "dialog:default",

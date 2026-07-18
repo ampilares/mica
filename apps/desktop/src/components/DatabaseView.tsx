@@ -11,13 +11,15 @@ import {
 } from "../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { docEvents } from "../docEvents";
-import { useStore, titleOfPath } from "../store";
+import { useStore } from "../store";
+import { resourceViewForPath, titleForPath } from "../workspace";
 import CsvImportDialog from "./CsvImportDialog";
 
 interface Props {
   path: string;
   embed: boolean;
   initialView?: string;
+  onViewChange?: (viewId: string) => void;
 }
 
 const ROW_HEIGHT = 34;
@@ -43,7 +45,7 @@ const OPERATORS_BY_TYPE: Record<string, string[]> = {
   checkbox: ["checked", "unchecked"],
 };
 
-export default function DatabaseView({ path, embed, initialView }: Props) {
+export default function DatabaseView({ path, embed, initialView, onViewChange }: Props) {
   const [db, setDb] = useState<Database | null>(null);
   const [version, setVersion] = useState<string>("");
   const [viewId, setViewId] = useState<string>(initialView ?? "table_default");
@@ -52,7 +54,7 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
   const [peekRowId, setPeekRowId] = useState<string | null>(null);
   const [csvSrc, setCsvSrc] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const openTab = useStore((s) => s.openTab);
+  const openResource = useStore((s) => s.openWorkspaceResource);
   const pathRef = useRef(path);
   pathRef.current = path;
   const viewIdRef = useRef(viewId);
@@ -87,14 +89,19 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
 
   useEffect(() => {
     void refreshRows(db ?? undefined);
+    onViewChange?.(viewId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewId]);
+
+  useEffect(() => {
+    if (initialView && initialView !== viewIdRef.current) setViewId(initialView);
+  }, [initialView]);
 
   useEffect(() => {
     return docEvents.on((ev) => {
       if ("path" in ev && ev.path === pathRef.current) void load();
       if (ev.type === "renamed" && ev.from === pathRef.current) {
-        useStore.getState().renameTab(ev.from, ev.to);
+        useStore.getState().renameWorkspaceResource(ev.from, ev.to);
       }
     });
   }, [load]);
@@ -163,7 +170,7 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
               }}
               onExport={async () => {
                 const dest = await saveDialog({
-                  defaultPath: `${titleOfPath(path)}.csv`,
+                  defaultPath: `${titleForPath(path)}.csv`,
                   filters: [{ name: "CSV", extensions: ["csv"] }],
                 });
                 if (typeof dest !== "string") return;
@@ -176,7 +183,7 @@ export default function DatabaseView({ path, embed, initialView }: Props) {
         {embed && (
           <button
             className="small"
-            onClick={() => openTab({ path, kind: "database", title: titleOfPath(path) })}
+            onClick={() => { void openResource(resourceViewForPath(path)); }}
           >
             Open full page
           </button>
@@ -933,9 +940,9 @@ function NoteLinkCell({
   value: string;
   onChange: (value: unknown) => void;
 }) {
-  const openTab = useStore((s) => s.openTab);
+  const openResource = useStore((s) => s.openWorkspaceResource);
   const pick = async () => {
-    const title = prompt("Link to note (title)", value ? titleOfPath(value) : "");
+    const title = prompt("Link to note (title)", value ? titleForPath(value) : "");
     if (title === null) return;
     if (title === "") {
       onChange(null);
@@ -959,9 +966,9 @@ function NoteLinkCell({
         <button
           className="linkish"
           title={value}
-          onClick={() => openTab({ path: value, kind: "note", title: titleOfPath(value) })}
+          onClick={() => { void openResource(resourceViewForPath(value)); }}
         >
-          {titleOfPath(value)}
+          {titleForPath(value)}
         </button>
       ) : (
         <span className="muted small">—</span>

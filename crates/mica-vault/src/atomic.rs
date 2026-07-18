@@ -25,13 +25,34 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> Result<ContentHash> {
         .map_err(|e| CoreError::io(dir, e))?;
 
     tmp.write_all(bytes).map_err(|e| CoreError::io(target, e))?;
-    tmp.as_file().sync_all().map_err(|e| CoreError::io(target, e))?;
+    tmp.as_file()
+        .sync_all()
+        .map_err(|e| CoreError::io(target, e))?;
 
     // `persist` renames with replace semantics on all platforms.
     tmp.persist(target)
         .map_err(|e| CoreError::io(target, e.error))?;
 
+    sync_parent_directory(dir)?;
+
     Ok(ContentHash::of(bytes))
+}
+
+/// Make the renamed directory entry durable where the standard library offers
+/// a safe directory handle. Unix requires this extra fsync after the atomic
+/// rename. Rust's portable Windows API cannot open a directory with the flags
+/// needed for `FlushFileBuffers`, so Windows retains atomic replacement but not
+/// this additional power-loss durability guarantee.
+#[cfg(unix)]
+fn sync_parent_directory(dir: &Path) -> Result<()> {
+    fs::File::open(dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| CoreError::io(dir, error))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_dir: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -53,5 +74,15 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains("tmp"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_directory_can_be_synced_after_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("durable.json");
+        atomic_write(&target, b"durable").unwrap();
+        sync_parent_directory(dir.path()).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"durable");
     }
 }

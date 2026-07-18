@@ -5,71 +5,69 @@ import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { syntaxHighlighting } from "@codemirror/language";
 import { oneDarkHighlightStyle } from "@codemirror/theme-one-dark";
-import { api, isApiError } from "../api";
-import { useStore, titleOfPath } from "../store";
+import { useStore } from "../store";
 import { docEvents } from "../docEvents";
 import ModeToggle from "./ModeToggle";
 import { useSettings } from "../settings";
+import { titleForPath, type TabId, type TextSelectionPosition } from "../workspace";
+import {
+  flushDocument,
+  openDocument,
+  replaceDocument,
+  restoreDocument,
+  subscribeDocument,
+  updateDocument,
+} from "../documents";
 
 /**
  * Raw Markdown source mode (FR-NOTE-009). Edits the full file including
  * frontmatter — this is also the surface for hand-fixing Git conflict
  * markers, so nothing is hidden or rewritten client-side.
  */
-export default function SourceEditor({ path, active }: { path: string; active: boolean }) {
+export default function SourceEditor({
+  path,
+  tabId,
+  active,
+  selection,
+  onSelectionChange,
+}: {
+  path: string;
+  tabId: TabId;
+  active: boolean;
+  selection?: TextSelectionPosition;
+  onSelectionChange?: (selection: TextSelectionPosition) => void;
+}) {
   const setSaveStatus = useStore((s) => s.setSaveStatus);
   const setConflict = useStore((s) => s.setConflict);
 
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
-  const versionRef = useRef<string>("");
-  const dirtyRef = useRef(false);
-  const savingRef = useRef(false);
   const loadedRef = useRef(false);
-  const saveTimer = useRef<number | null>(null);
+  const originRef = useRef(`source-${crypto.randomUUID()}`);
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  onSelectionChangeRef.current = onSelectionChange;
   const pathRef = useRef(path);
   pathRef.current = path;
   const [deletedBanner, setDeletedBanner] = useState(false);
-
-  const save = async () => {
-    const view = viewRef.current;
-    if (!view || savingRef.current || !dirtyRef.current) return;
-    savingRef.current = true;
-    setSaveStatus("saving");
-    const content = view.state.doc.toString();
-    try {
-      const result = await api.noteSave(pathRef.current, content, versionRef.current);
-      versionRef.current = result.version;
-      dirtyRef.current = false;
-      setSaveStatus("saved");
-    } catch (e) {
-      setSaveStatus("error");
-      if (isApiError(e) && e.code === "conflict") {
-        setConflict({ path: pathRef.current, myContent: content });
-      } else {
-        console.error("save failed", e);
-      }
-    } finally {
-      savingRef.current = false;
-    }
-  };
-
-  const scheduleSave = () => {
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(
-      () => void save(),
-      useSettings.getState().autosaveDelay,
-    );
-  };
 
   const setDoc = (content: string) => {
     const view = viewRef.current;
     if (!view) return;
     loadedRef.current = false;
+    const priorSelection = selectionRef.current ?? {
+      anchor: view.state.selection.main.anchor,
+      head: view.state.selection.main.head,
+    };
+    const clamp = (position: number) => Math.min(content.length, Math.max(0, position));
     view.dispatch({
       changes: { from: 0, to: view.state.doc.length, insert: content },
+      selection: {
+        anchor: clamp(priorSelection.anchor),
+        head: clamp(priorSelection.head),
+      },
     });
-    dirtyRef.current = false;
     loadedRef.current = true;
   };
 
@@ -90,8 +88,14 @@ export default function SourceEditor({ path, active }: { path: string; active: b
           EditorView.lineWrapping,
           EditorView.updateListener.of((update) => {
             if (update.docChanged && loadedRef.current) {
-              dirtyRef.current = true;
-              scheduleSave();
+              updateDocument(pathRef.current, update.state.doc.toString(), {
+                origin: originRef.current,
+                autosaveDelay: useSettings.getState().autosaveDelay,
+              });
+            }
+            if (update.selectionSet && loadedRef.current) {
+              const { anchor, head } = update.state.selection.main;
+              onSelectionChangeRef.current?.({ anchor, head });
             }
           }),
         ],
@@ -99,42 +103,41 @@ export default function SourceEditor({ path, active }: { path: string; active: b
     });
     viewRef.current = view;
 
-    api
-      .noteLoad(path)
-      .then((file) => {
-        versionRef.current = file.version;
-        setDoc(file.content);
-      })
-      .catch((e) => console.error("load failed", e));
+    const unsubscribe = subscribeDocument(path, ({ snapshot, origin }) => {
+      setSaveStatus(snapshot.saveState);
+      setDeletedBanner(snapshot.deleted);
+      if (snapshot.saveError?.kind === "conflict") {
+        setConflict({ path, myContent: snapshot.content });
+      }
+      if (snapshot.loaded && origin !== originRef.current) setDoc(snapshot.content);
+    });
+    void openDocument(path).catch((e) => console.error("load failed", e));
 
     return () => {
-      if (dirtyRef.current) void save();
+      unsubscribe();
+      void flushDocument(path);
       view.destroy();
       viewRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !loadedRef.current || !selection) return;
+    const clamp = (position: number) => Math.min(view.state.doc.length, Math.max(0, position));
+    const anchor = clamp(selection.anchor);
+    const head = clamp(selection.head);
+    if (view.state.selection.main.anchor === anchor && view.state.selection.main.head === head) return;
+    view.dispatch({ selection: { anchor, head } });
+  }, [selection?.anchor, selection?.head]);
+
   // External file events for this document.
   useEffect(() => {
     return docEvents.on(async (ev) => {
       const p = pathRef.current;
-      if (ev.type === "modified" && ev.path === p) {
-        if (dirtyRef.current) {
-          setConflict({ path: p, myContent: viewRef.current?.state.doc.toString() ?? "" });
-        } else {
-          try {
-            const file = await api.noteLoad(p);
-            versionRef.current = file.version;
-            setDoc(file.content);
-          } catch {
-            /* deleted between event and load */
-          }
-        }
-      } else if (ev.type === "deleted" && ev.path === p) {
-        setDeletedBanner(true);
-      } else if (ev.type === "renamed" && ev.from === p) {
-        useStore.getState().renameTab(ev.from, ev.to);
+      if (ev.type === "renamed" && ev.from === p) {
+        useStore.getState().renameWorkspaceResource(ev.from, ev.to);
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -149,8 +152,7 @@ export default function SourceEditor({ path, active }: { path: string; active: b
         version: string;
       };
       if (detail.path === pathRef.current) {
-        versionRef.current = detail.version;
-        setDoc(detail.content);
+        replaceDocument(detail.path, detail.content, detail.version);
       }
     };
     window.addEventListener("mica:conflict-resolved", handler);
@@ -161,7 +163,7 @@ export default function SourceEditor({ path, active }: { path: string; active: b
   // Flush pending save on window blur.
   useEffect(() => {
     const flush = () => {
-      if (dirtyRef.current) void save();
+      void flushDocument(pathRef.current);
     };
     window.addEventListener("blur", flush);
     return () => window.removeEventListener("blur", flush);
@@ -175,22 +177,18 @@ export default function SourceEditor({ path, active }: { path: string; active: b
           This file was deleted on disk.
           <button
             onClick={async () => {
-              await api.noteSave(
-                pathRef.current,
-                viewRef.current?.state.doc.toString() ?? "",
-                undefined,
-              );
-              setDeletedBanner(false);
+              const result = await restoreDocument(pathRef.current);
+              if (result.ok) setDeletedBanner(false);
             }}
           >
             Restore
           </button>
-          <button onClick={() => useStore.getState().closeTab(pathRef.current)}>Close</button>
+          <button onClick={() => { void useStore.getState().closeWorkspaceTab(tabId); }}>Close</button>
         </div>
       )}
       <div className="note-header">
-        <div className="note-title">{titleOfPath(path)}</div>
-        <ModeToggle path={path} />
+        <div className="note-title">{titleForPath(path)}</div>
+        <ModeToggle tabId={tabId} source />
       </div>
       <div ref={hostRef} className="source-editor-host" />
     </div>

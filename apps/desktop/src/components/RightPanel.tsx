@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, BacklinkHit } from "../api";
-import { useStore, titleOfPath, kindOfPath } from "../store";
+import { useStore } from "../store";
+import { resourcePath, resourceViewForPath, titleForPath } from "../workspace";
 import { docEvents } from "../docEvents";
 
 interface OutlineItem {
@@ -11,23 +12,28 @@ interface OutlineItem {
 /** Right sidebar: outline, backlinks, outgoing links for the active note. */
 export default function RightPanel() {
   const open = useStore((s) => s.rightPanelOpen);
-  const activePath = useStore((s) => s.activePath);
-  const openTab = useStore((s) => s.openTab);
+  const activeResourcePath = useStore((s) => {
+    const pane = s.workspace.panes[s.workspace.focusedPaneId];
+    return pane ? resourcePath(s.workspace.tabs[pane.activeTabId].view) : undefined;
+  });
+  const sidebar = useStore((s) => s.workspace.sidebars.right);
+  const setSidebar = useStore((s) => s.setWorkspaceSidebar);
+  const openResource = useStore((s) => s.openWorkspaceResource);
   const [outline, setOutline] = useState<OutlineItem[]>([]);
   const [backlinks, setBacklinks] = useState<BacklinkHit[]>([]);
   const [outgoing, setOutgoing] = useState<{ target: string; resolved: string | null }[]>([]);
 
-  const isNote = activePath?.endsWith(".md") ?? false;
+  const isNote = activeResourcePath?.endsWith(".md") ?? false;
 
   useEffect(() => {
-    if (!open || !activePath || !isNote) return;
+    if (!open || !activeResourcePath || !isNote) return;
     let cancelled = false;
 
     const refresh = async () => {
       try {
         const [file, links] = await Promise.all([
-          api.noteLoad(activePath),
-          api.backlinks(activePath),
+          api.noteLoad(activeResourcePath),
+          api.backlinks(activeResourcePath),
         ]);
         if (cancelled) return;
         setBacklinks(links);
@@ -68,7 +74,7 @@ export default function RightPanel() {
     void refresh();
     // Refresh when this file (or anything, cheaply) changes on disk.
     const off = docEvents.on((ev) => {
-      if ("path" in ev && ev.path === activePath) void refresh();
+      if ("path" in ev && ev.path === activeResourcePath) void refresh();
     });
     const interval = window.setInterval(refresh, 5000);
     return () => {
@@ -76,9 +82,24 @@ export default function RightPanel() {
       off();
       window.clearInterval(interval);
     };
-  }, [open, activePath, isNote]);
+  }, [open, activeResourcePath, isNote]);
 
-  if (!open || !activePath || !isNote) return null;
+  if (!open || !activeResourcePath || !isNote) return null;
+
+  const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const move = (next: PointerEvent) => setSidebar("right", { width: Math.max(210, Math.min(440, window.innerWidth - next.clientX)) });
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
+  };
 
   const openWiki = async (name: string, resolved: string | null) => {
     let target = resolved;
@@ -87,11 +108,28 @@ export default function RightPanel() {
       target = file.path;
       await useStore.getState().refreshTree();
     }
-    openTab({ path: target, kind: "note", title: titleOfPath(target) });
+    await openResource(resourceViewForPath(target));
   };
 
   return (
-    <div className="right-panel">
+    <div className="right-panel" style={{ width: sidebar.width, flexBasis: sidebar.width }}>
+      <div
+        className="right-panel-resizer"
+        role="separator"
+        aria-label="Resize context sidebar"
+        aria-orientation="vertical"
+        aria-valuemin={210}
+        aria-valuemax={440}
+        aria-valuenow={Math.round(sidebar.width)}
+        tabIndex={0}
+        onPointerDown={beginResize}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          const step = event.shiftKey ? 40 : 10;
+          setSidebar("right", { width: Math.max(210, Math.min(440, sidebar.width + (event.key === "ArrowLeft" ? step : -step))) });
+        }}
+      />
       <div className="panel-section">
         <div className="panel-title">Outline</div>
         {outline.length === 0 && <p className="muted small">No headings</p>}
@@ -113,14 +151,10 @@ export default function RightPanel() {
             key={i}
             className="panel-link"
             onClick={() =>
-              openTab({
-                path: b.source,
-                kind: kindOfPath(b.source) === "note" ? "note" : "note",
-                title: titleOfPath(b.source),
-              })
+              openResource(resourceViewForPath(b.source))
             }
           >
-            {b.source_title || titleOfPath(b.source)}
+            {b.source_title || titleForPath(b.source)}
             <span className="muted small">{b.source}</span>
           </button>
         ))}

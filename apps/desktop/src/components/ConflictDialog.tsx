@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, isApiError } from "../api";
 import { useStore } from "../store";
 import { compactDiff, diffLines, DiffLine } from "../diff";
+import { resourceViewForPath } from "../workspace";
 
 /**
  * Shown when a save hit a newer on-disk version, or an external edit arrived
@@ -51,9 +52,10 @@ export default function ConflictDialog() {
         window.dispatchEvent(
           new CustomEvent("mica:conflict-resolved", { detail: theirs }),
         );
-        useStore
-          .getState()
-          .openTab({ path: outcome.path, kind: "note", title: outcome.path });
+        await useStore.getState().openWorkspaceResource(resourceViewForPath(outcome.path), {
+          newTab: true,
+          activate: true,
+        });
         await refreshTree();
       }
       setConflict(null);

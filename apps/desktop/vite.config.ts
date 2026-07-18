@@ -17,5 +17,16 @@ export default defineConfig({
     target: "chrome110",
     minify: "esbuild",
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/@tiptap") || id.includes("node_modules/prosemirror") || id.includes("node_modules/tiptap-markdown")) return "editor-rich";
+          if (id.includes("node_modules/@codemirror")) return "editor-source";
+          if (id.includes("node_modules/@tauri-apps")) return "tauri";
+          if (id.includes("node_modules/react") || id.includes("node_modules/zustand")) return "framework";
+          return undefined;
+        },
+      },
+    },
   },
 });

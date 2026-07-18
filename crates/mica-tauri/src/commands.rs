@@ -56,28 +56,32 @@ fn open_vault_inner(app: &AppHandle, state: &AppState, vault: Vault) -> ApiResul
         let app = app.clone();
         let vault_w = vault.clone();
         let index_w = index.clone();
-        VaultWatcher::start(vault.root(), filter.clone(), move |events: Vec<VaultEvent>| {
-            {
-                let mut idx = index_w.lock().unwrap();
-                for event in &events {
-                    let result = match event {
-                        VaultEvent::Created { path } | VaultEvent::Modified { path } => {
-                            if vault_w.exists(path) {
-                                idx.update_file(&vault_w, path)
-                            } else {
-                                idx.remove_file(path)
+        VaultWatcher::start(
+            vault.root(),
+            filter.clone(),
+            move |events: Vec<VaultEvent>| {
+                {
+                    let mut idx = index_w.lock().unwrap();
+                    for event in &events {
+                        let result = match event {
+                            VaultEvent::Created { path } | VaultEvent::Modified { path } => {
+                                if vault_w.exists(path) {
+                                    idx.update_file(&vault_w, path)
+                                } else {
+                                    idx.remove_file(path)
+                                }
                             }
+                            VaultEvent::Deleted { path } => idx.remove_file(path),
+                            VaultEvent::Renamed { from, to } => idx.rename_file(&vault_w, from, to),
+                        };
+                        if let Err(e) = result {
+                            tracing::warn!("incremental index update failed: {e}");
                         }
-                        VaultEvent::Deleted { path } => idx.remove_file(path),
-                        VaultEvent::Renamed { from, to } => idx.rename_file(&vault_w, from, to),
-                    };
-                    if let Err(e) = result {
-                        tracing::warn!("incremental index update failed: {e}");
                     }
                 }
-            }
-            let _ = app.emit("vault:events", &events);
-        })
+                let _ = app.emit("vault:events", &events);
+            },
+        )
         .map_err(|e| ApiError {
             code: "watch_failed".into(),
             message: e.to_string(),
@@ -139,6 +143,22 @@ pub fn vault_close(state: State<'_, AppState>) -> ApiResult<()> {
     Ok(())
 }
 
+/// Returns the currently open vault without turning the normal "no vault"
+/// startup state into an API error. Native windows use this to attach to the
+/// process-wide vault opened by another Mica window.
+#[tauri::command]
+pub fn vault_current(state: State<'_, AppState>) -> ApiResult<Option<VaultInfo>> {
+    let open = state.open.lock().map_err(|_| ApiError {
+        code: "state_poisoned".into(),
+        message: "vault state lock is poisoned".into(),
+        path: None,
+    })?;
+    Ok(open.as_ref().map(|open| VaultInfo {
+        root: open.vault.root().display().to_string(),
+        name: open.vault.config().name.clone(),
+    }))
+}
+
 #[tauri::command]
 pub fn vault_tree(state: State<'_, AppState>) -> ApiResult<FileTree> {
     let open = state.current().map_err(ApiError::from)?;
@@ -162,13 +182,13 @@ pub fn vault_open_external(state: State<'_, AppState>, path: String) -> ApiResul
     let open = state.current().map_err(ApiError::from)?;
     let rel = VaultPath::new(&path).map_err(ApiError::from)?;
     let abs = open.vault.abs(&rel);
-    tauri_plugin_opener::open_path(abs.to_string_lossy().to_string(), None::<String>).map_err(
-        |e| ApiError {
+    tauri_plugin_opener::open_path(abs.to_string_lossy().to_string(), None::<String>).map_err(|e| {
+        ApiError {
             code: "open_failed".into(),
             message: e.to_string(),
             path: Some(path),
-        },
-    )
+        }
+    })
 }
 
 // ---------------------------------------------------------------- notes ----
@@ -193,7 +213,10 @@ fn guarded_write(
             }
         }
     }
-    let hash = open.vault.write_text(path, content).map_err(ApiError::from)?;
+    let hash = open
+        .vault
+        .write_text(path, content)
+        .map_err(ApiError::from)?;
     open.filter.record(&open.vault.abs(path), hash.clone());
     // Keep the index in sync immediately (the watcher event is filtered).
     if let Err(e) = open.index.lock().unwrap().update_file(&open.vault, path) {
@@ -216,10 +239,20 @@ pub fn note_create(
         let cleaned: String = title
             .trim()
             .chars()
-            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { ' ' } else { c })
+            .map(|c| {
+                if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                    ' '
+                } else {
+                    c
+                }
+            })
             .collect();
         let cleaned = cleaned.trim().to_string();
-        if cleaned.is_empty() { slugify(&title) } else { cleaned }
+        if cleaned.is_empty() {
+            slugify(&title)
+        } else {
+            cleaned
+        }
     } else {
         slugify(&title)
     };
@@ -292,12 +325,9 @@ pub fn note_rename(
         let Ok((content, _)) = open.vault.read_text(&source) else {
             continue;
         };
-        if let Some(rewritten) = mica_markdown::rewrite_links(
-            &content,
-            source.as_str(),
-            from.as_str(),
-            to.as_str(),
-        ) {
+        if let Some(rewritten) =
+            mica_markdown::rewrite_links(&content, source.as_str(), from.as_str(), to.as_str())
+        {
             if let Ok(hash) = open.vault.write_text(&source, &rewritten) {
                 open.filter.record(&open.vault.abs(&source), hash);
             }
@@ -316,7 +346,10 @@ pub fn note_duplicate(state: State<'_, AppState>, path: String) -> ApiResult<Loa
     let open = state.current().map_err(ApiError::from)?;
     let rel = VaultPath::new(&path).map_err(ApiError::from)?;
     let (content, _) = open.vault.read_text(&rel).map_err(ApiError::from)?;
-    let dir = rel.parent().map(|p| p.as_str().to_string()).unwrap_or_default();
+    let dir = rel
+        .parent()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_default();
     let ext = rel.extension().unwrap_or("md").to_string();
     let copy_path = open
         .vault
@@ -364,7 +397,13 @@ pub fn asset_save(
         })?;
     let safe_name: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let (stem, ext) = match safe_name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_string(), e.to_string()),
@@ -375,7 +414,10 @@ pub fn asset_save(
         .vault
         .unique_path(&dir, &stem, &ext)
         .map_err(ApiError::from)?;
-    let hash = open.vault.write_bytes(&path, &bytes).map_err(ApiError::from)?;
+    let hash = open
+        .vault
+        .write_bytes(&path, &bytes)
+        .map_err(ApiError::from)?;
     open.filter.record(&open.vault.abs(&path), hash);
     Ok(path)
 }
@@ -435,8 +477,7 @@ pub fn vault_export(
     dest: String,
 ) -> ApiResult<usize> {
     let open = state.current().map_err(ApiError::from)?;
-    let vault_paths: Result<Vec<VaultPath>, _> =
-        paths.iter().map(|p| VaultPath::new(p)).collect();
+    let vault_paths: Result<Vec<VaultPath>, _> = paths.iter().map(|p| VaultPath::new(p)).collect();
     let vault_paths = vault_paths.map_err(ApiError::from)?;
     open.vault
         .export_files(&vault_paths, &PathBuf::from(&dest))
@@ -494,22 +535,16 @@ pub fn conflict_resolve(
             if open.vault.exists(&rel) {
                 let (theirs, _) = open.vault.read_text(&rel).map_err(ApiError::from)?;
                 let stamp = mica_core::now_rfc3339().replace(':', "-");
-                let backup = VaultPath::new(&format!(
-                    "{WORKSPACE_DIR}/backups/{stamp}/{}",
-                    rel.as_str()
-                ))
-                .map_err(ApiError::from)?;
+                let backup =
+                    VaultPath::new(&format!("{WORKSPACE_DIR}/backups/{stamp}/{}", rel.as_str()))
+                        .map_err(ApiError::from)?;
                 open.vault
                     .write_text(&backup, &theirs)
                     .map_err(ApiError::from)?;
             }
             let disk = open.vault.hash_of(&rel).ok();
-            let version = guarded_write(
-                &open,
-                &rel,
-                &my_content,
-                disk.as_ref().map(|h| h.as_str()),
-            )?;
+            let version =
+                guarded_write(&open, &rel, &my_content, disk.as_ref().map(|h| h.as_str()))?;
             Ok(ConflictOutcome {
                 path: rel,
                 content: my_content,
@@ -764,7 +799,9 @@ fn href_to_vault_path(canvas_path: &VaultPath, href: &str) -> Option<String> {
     } else {
         format!("{dir}/{href}")
     };
-    VaultPath::new(&combined).ok().map(|p| p.as_str().to_string())
+    VaultPath::new(&combined)
+        .ok()
+        .map(|p| p.as_str().to_string())
 }
 
 /// Re-base a vault-relative path so it is relative to `canvas_path`'s folder.
@@ -867,9 +904,7 @@ pub fn canvas_export(
             }
             mica_drawio::interop::export_obsidian(&scene).map_err(ApiError::from)?
         }
-        "excalidraw" => {
-            mica_drawio::interop::export_excalidraw(&scene).map_err(ApiError::from)?
-        }
+        "excalidraw" => mica_drawio::interop::export_excalidraw(&scene).map_err(ApiError::from)?,
         other => {
             return Err(ApiError {
                 code: "bad_format".into(),
@@ -915,7 +950,8 @@ pub fn search_query(
 ) -> ApiResult<Vec<SearchHit>> {
     let open = state.current().map_err(ApiError::from)?;
     let idx = open.index.lock().unwrap();
-    idx.search(&query, limit.unwrap_or(50)).map_err(ApiError::from)
+    idx.search(&query, limit.unwrap_or(50))
+        .map_err(ApiError::from)
 }
 
 #[tauri::command]

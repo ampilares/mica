@@ -1,15 +1,19 @@
 import { useEffect, useState } from "react";
 import { api, FileNode, TagCount } from "../api";
-import { useStore, kindOfPath, titleOfPath } from "../store";
+import { useStore } from "../store";
+import { resourcePath, resourceViewForPath } from "../workspace";
+import { Icon, IconButton } from "./ui";
 
 export default function Sidebar() {
   const vault = useStore((s) => s.vault);
   const tree = useStore((s) => s.tree);
   const refreshTree = useStore((s) => s.refreshTree);
-  const openTab = useStore((s) => s.openTab);
+  const openWorkspaceResource = useStore((s) => s.openWorkspaceResource);
   const setSearchOpen = useStore((s) => s.setSearchOpen);
   const [tags, setTags] = useState<TagCount[]>([]);
   const [tagsOpen, setTagsOpen] = useState(false);
+  const sidebar = useStore((s) => s.workspace.sidebars.left);
+  const setSidebar = useStore((s) => s.setWorkspaceSidebar);
 
   useEffect(() => {
     refreshTree();
@@ -26,7 +30,7 @@ export default function Sidebar() {
     if (!title) return;
     const file = await api.noteCreate(title);
     await refreshTree();
-    openTab({ path: file.path, kind: "note", title: titleOfPath(file.path) });
+    await openWorkspaceResource(resourceViewForPath(file.path));
   };
 
   const createDatabase = async () => {
@@ -34,7 +38,7 @@ export default function Sidebar() {
     if (!title) return;
     const file = await api.dbCreate(title);
     await refreshTree();
-    openTab({ path: file.path, kind: "database", title: titleOfPath(file.path) });
+    await openWorkspaceResource(resourceViewForPath(file.path));
   };
 
   const createCanvas = async () => {
@@ -42,25 +46,42 @@ export default function Sidebar() {
     if (!title) return;
     const file = await api.canvasCreate(title);
     await refreshTree();
-    openTab({ path: file.path, kind: "canvas", title: titleOfPath(file.path) });
+    await openWorkspaceResource(resourceViewForPath(file.path));
+  };
+
+  if (!sidebar.open) return null;
+
+  const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.setPointerCapture(event.pointerId);
+    const move = (next: PointerEvent) => setSidebar("left", { width: Math.max(190, Math.min(420, next.clientX - 42)) });
+    const finish = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish, { once: true });
+    window.addEventListener("pointercancel", finish, { once: true });
   };
 
   return (
-    <div className="sidebar">
+    <div className="sidebar" style={{ width: sidebar.width, flexBasis: sidebar.width }}>
       <div className="sidebar-header">
         <div>
           <span className="sidebar-eyebrow">Vault</span>
           <span className="vault-name" title={vault?.root}>{vault?.name}</span>
         </div>
-        <button className="icon-button" title="Quick switcher (Ctrl+P)" onClick={() => useStore.getState().setQuickSwitcherOpen(true)}>⌕</button>
+        <IconButton className="icon-button" label="Quick switcher" tooltip="Quick switcher (Ctrl+P)" icon="search" onClick={() => useStore.getState().setQuickSwitcherOpen(true)} />
       </div>
       <div className="sidebar-actions">
-        <button title="New note" onClick={createNote}>＋ Note</button>
-        <button title="New database" onClick={createDatabase}>＋ Database</button>
-        <button title="New canvas" onClick={createCanvas}>＋ Canvas</button>
+        <button title="New note" onClick={createNote}><Icon name="note" size={14} /> Note</button>
+        <button title="New database" onClick={createDatabase}><Icon name="database" size={14} /> Database</button>
+        <button title="New canvas" onClick={createCanvas}><Icon name="canvas" size={14} /> Canvas</button>
       </div>
-      <div className="sidebar-label"><span>Files</span><button title="Search" onClick={() => setSearchOpen(true)}>⌕</button></div>
-      <div className="file-tree">
+      <div className="sidebar-label"><span>Files</span><IconButton label="Search files" icon="search" onClick={() => setSearchOpen(true)} /></div>
+      <div className="file-tree" role="tree" aria-label="Vault files">
         {tree?.roots.map((node) => <TreeNode key={node.path} node={node} depth={0} />)}
       </div>
       <div className="sidebar-section">
@@ -88,18 +109,50 @@ export default function Sidebar() {
           </div>
         )}
       </div>
+      <div
+        className="sidebar-resizer"
+        role="separator"
+        aria-label="Resize file sidebar"
+        aria-orientation="vertical"
+        aria-valuemin={190}
+        aria-valuemax={420}
+        aria-valuenow={Math.round(sidebar.width)}
+        tabIndex={0}
+        onPointerDown={beginResize}
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          const step = event.shiftKey ? 40 : 10;
+          setSidebar("left", { width: Math.max(190, Math.min(420, sidebar.width + (event.key === "ArrowRight" ? step : -step))) });
+        }}
+      />
     </div>
   );
 }
 
 function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
   const [expanded, setExpanded] = useState(depth < 1);
-  const openTab = useStore((s) => s.openTab);
-  const activePath = useStore((s) => s.activePath);
+  const activeResourcePath = useStore((s) => {
+    const pane = s.workspace.panes[s.workspace.focusedPaneId];
+    return pane ? resourcePath(s.workspace.tabs[pane.activeTabId].view) : undefined;
+  });
   const refreshTree = useStore((s) => s.refreshTree);
-  const closeTab = useStore((s) => s.closeTab);
-  const renameTab = useStore((s) => s.renameTab);
+  const renameResource = useStore((s) => s.renameWorkspaceResource);
+  const markMissing = useStore((s) => s.markWorkspaceResourceMissing);
+  const openWorkspaceResource = useStore((s) => s.openWorkspaceResource);
   const [menuOpen, setMenuOpen] = useState(false);
+
+  const moveTreeFocus = (current: HTMLElement, key: string) => {
+    const tree = current.closest('[role="tree"]');
+    const items = tree ? Array.from(tree.querySelectorAll<HTMLElement>('[role="treeitem"]')) : [];
+    const index = items.indexOf(current);
+    const target = key === "Home"
+      ? items[0]
+      : key === "End"
+        ? items[items.length - 1]
+        : items[index + (key === "ArrowUp" ? -1 : 1)];
+    target?.focus();
+  };
 
   if (node.is_dir) {
     return (
@@ -107,23 +160,50 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
         <div
           className="tree-item dir"
           style={{ paddingLeft: depth * 14 + 8 }}
+          role="treeitem"
+          aria-expanded={expanded}
+          aria-level={depth + 1}
+          tabIndex={0}
           onClick={() => setExpanded(!expanded)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") setExpanded(!expanded);
+            else if (event.key === "ArrowRight") {
+              if (!expanded) setExpanded(true);
+              else (event.currentTarget.parentElement?.querySelector('[role="group"] [role="treeitem"]') as HTMLElement | null)?.focus();
+            } else if (event.key === "ArrowLeft") {
+              if (expanded) setExpanded(false);
+              else {
+                const parentGroup = event.currentTarget.parentElement?.parentElement;
+                const parentItem = parentGroup?.parentElement?.querySelector<HTMLElement>(':scope > [role="treeitem"]');
+                parentItem?.focus();
+              }
+            } else if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+              moveTreeFocus(event.currentTarget, event.key);
+            } else return;
+            event.preventDefault();
+          }}
         >
           <span className="chevron">{expanded ? "▾" : "▸"}</span> {node.name}
         </div>
-        {expanded &&
-          node.children?.map((c) => <TreeNode key={c.path} node={c} depth={depth + 1} />)}
+        {expanded && (
+          <div role="group">
+            {node.children?.map((c) => <TreeNode key={c.path} node={c} depth={depth + 1} />)}
+          </div>
+        )}
       </div>
     );
   }
 
-  const kind = node.kind ?? kindOfPath(node.path);
-  const icon =
-    kind === "note" ? "📄" : kind === "database" ? "🗃️" : kind === "canvas" ? "🗺️" : "📎";
+  const view = resourceViewForPath(node.path);
+  const kind = node.kind ?? view.type;
+  const icon = kind === "note" ? "note" : kind === "database" ? "database" : kind === "canvas" ? "canvas" : "file";
 
-  const onOpen = () => {
+  const onOpen = (event?: React.MouseEvent) => {
     if (kind === "note" || kind === "database" || kind === "canvas") {
-      openTab({ path: node.path, kind, title: titleOfPath(node.path) });
+      const modified = !!event && (event.metaKey || event.ctrlKey || event.button === 1);
+      openWorkspaceResource(view, modified
+        ? { newTab: true, activate: event?.shiftKey }
+        : undefined);
     } else {
       api.vaultOpenExternal(node.path).catch(() => {});
     }
@@ -138,7 +218,7 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
       : "";
     try {
       const to = await api.noteRename(node.path, dir + newName);
-      renameTab(node.path, to);
+      renameResource(node.path, to);
       await refreshTree();
     } catch (e) {
       alert(`Rename failed: ${JSON.stringify(e)}`);
@@ -150,7 +230,7 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
     if (!confirm(`Move "${node.name}" to trash?`)) return;
     try {
       await api.noteDelete(node.path);
-      closeTab(node.path);
+      await markMissing(node.path, "File was moved to trash");
       await refreshTree();
     } catch (e) {
       alert(`Delete failed: ${JSON.stringify(e)}`);
@@ -159,9 +239,18 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
 
   return (
     <div
-      className={`tree-item file ${activePath === node.path ? "active" : ""}`}
+      className={`tree-item file ${activeResourcePath === node.path ? "active" : ""}`}
       style={{ paddingLeft: depth * 14 + 8 }}
-      onClick={onOpen}
+      role="treeitem"
+      aria-level={depth + 1}
+      aria-selected={activeResourcePath === node.path}
+      aria-haspopup="menu"
+      aria-expanded={menuOpen}
+      tabIndex={0}
+      onClick={(event) => onOpen(event)}
+      onAuxClick={(event) => {
+        if (event.button === 1) onOpen(event);
+      }}
       draggable
       onDragStart={(e) => {
         e.dataTransfer.setData("application/x-mica-path", node.path);
@@ -171,12 +260,27 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
         e.preventDefault();
         setMenuOpen(true);
       }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        } else if ((event.shiftKey && event.key === "F10") || event.key === "ContextMenu") {
+          event.preventDefault();
+          const row = event.currentTarget;
+          setMenuOpen(true);
+          requestAnimationFrame(() => row.querySelector<HTMLElement>('[role="menuitem"]')?.focus());
+        } else if (["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+          event.preventDefault();
+          moveTreeFocus(event.currentTarget, event.key);
+        }
+      }}
     >
-      <span className="file-icon">{icon}</span> {node.name}
+      <span className="file-icon"><Icon name={icon} size={14} /></span> {node.name}
       {menuOpen && (
-        <div className="context-menu" onMouseLeave={() => setMenuOpen(false)}>
-          <button onClick={(e) => { e.stopPropagation(); onRename(); }}>Rename</button>
+        <div className="context-menu" role="menu" aria-label={`Actions for ${node.name}`} onMouseLeave={() => setMenuOpen(false)}>
+          <button role="menuitem" onClick={(e) => { e.stopPropagation(); onRename(); }}>Rename</button>
           <button
+            role="menuitem"
             onClick={async (e) => {
               e.stopPropagation();
               setMenuOpen(false);
@@ -190,8 +294,9 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
           >
             Duplicate
           </button>
-          <button onClick={(e) => { e.stopPropagation(); onDelete(); }}>Delete</button>
+          <button role="menuitem" onClick={(e) => { e.stopPropagation(); onDelete(); }}>Delete</button>
           <button
+            role="menuitem"
             onClick={(e) => {
               e.stopPropagation();
               setMenuOpen(false);
@@ -201,6 +306,7 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
             Reveal in Explorer
           </button>
           <button
+            role="menuitem"
             onClick={(e) => {
               e.stopPropagation();
               setMenuOpen(false);
@@ -210,6 +316,7 @@ function TreeNode({ node, depth }: { node: FileNode; depth: number }) {
             Open in external editor
           </button>
           <button
+            role="menuitem"
             onClick={(e) => {
               e.stopPropagation();
               setMenuOpen(false);

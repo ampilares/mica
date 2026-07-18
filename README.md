@@ -17,6 +17,11 @@ under `.workspace/` and never the source of truth. See [docs/PRD.md](docs/PRD.md
 [docs/specifications.md](docs/specifications.md), and
 [docs/implementation.md](docs/implementation.md).
 
+The implemented Obsidian-inspired v2 workspace is specified in
+[docs/PRD-v2-obsidian-workspace.md](docs/PRD-v2-obsidian-workspace.md), with its
+completed delivery plan and verification evidence in
+[docs/implementation-v2-obsidian-workspace.md](docs/implementation-v2-obsidian-workspace.md).
+
 ## Repository layout
 
 ```text

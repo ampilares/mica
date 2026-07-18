@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { api, SearchHit } from "../api";
-import { useStore, titleOfPath, kindOfPath } from "../store";
+import { useStore } from "../store";
+import { resourceViewForPath } from "../workspace";
 
 export default function SearchPanel() {
   const open = useStore((s) => s.searchOpen);
   const setOpen = useStore((s) => s.setSearchOpen);
-  const openTab = useStore((s) => s.openTab);
+  const openWorkspaceResource = useStore((s) => s.openWorkspaceResource);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<SearchHit[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -57,8 +58,11 @@ export default function SearchPanel() {
             <button
               key={hit.path}
               className="palette-item search-hit"
-              onClick={() => {
-                openTab({ path: hit.path, kind: kindOfPath(hit.path), title: titleOfPath(hit.path) });
+              onClick={(event) => {
+                const modified = event.metaKey || event.ctrlKey;
+                openWorkspaceResource(resourceViewForPath(hit.path), modified
+                  ? { newTab: true, activate: event.shiftKey }
+                  : undefined);
                 setOpen(false);
               }}
             >

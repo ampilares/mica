@@ -3,7 +3,9 @@
 
 mod commands;
 mod error;
+mod native_windows;
 mod state;
+mod workspace;
 
 use state::AppState;
 
@@ -21,6 +23,7 @@ fn main() {
             commands::vault_create,
             commands::vault_open,
             commands::vault_close,
+            commands::vault_current,
             commands::vault_tree,
             commands::vault_reveal,
             commands::vault_open_external,
@@ -57,6 +60,14 @@ fn main() {
             commands::tags_list,
             commands::resolve_wiki,
             commands::index_rebuild,
+            native_windows::workspace_window_create,
+            workspace::workspace_snapshot_read,
+            workspace::workspace_snapshot_write,
+            workspace::workspace_snapshot_window_ids,
+            workspace::workspace_preset_list,
+            workspace::workspace_preset_read,
+            workspace::workspace_preset_write,
+            workspace::workspace_preset_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Mica");

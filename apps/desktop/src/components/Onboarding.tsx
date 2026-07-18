@@ -3,6 +3,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, isApiError } from "../api";
 import { useStore } from "../store";
 import { useSettings } from "../settings";
+import { flushWorkspacePersistence } from "../workspace";
+import { resetDocumentSessions } from "../documents";
 
 export default function Onboarding() {
   const setVault = useStore((s) => s.setVault);
@@ -20,6 +22,12 @@ export default function Onboarding() {
     if (typeof dir !== "string") return;
     setBusy(true);
     try {
+      // Normally onboarding has no active vault, but retaining this barrier
+      // makes direct vault switching safe if this surface is reused later.
+      await flushWorkspacePersistence();
+      const documents = await resetDocumentSessions();
+      const failure = documents.find((result) => !result.ok || result.dirty);
+      if (failure) throw new Error(`Could not save ${failure.path}; vault was not switched`);
       const info =
         action === "create" ? await api.vaultCreate(dir) : await api.vaultOpen(dir);
       setVault(info);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { EditorContent, useEditor, Editor, Extension, BubbleMenu } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import TaskList from "@tiptap/extension-task-list";
@@ -10,8 +10,8 @@ import Placeholder from "@tiptap/extension-placeholder";
 import Suggestion from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
 import { Markdown } from "tiptap-markdown";
-import { api, isApiError } from "../api";
-import { useStore, titleOfPath } from "../store";
+import { api } from "../api";
+import { useStore } from "../store";
 import { splitFrontmatter, restoreWikiLinks } from "../markdown";
 import { docEvents } from "../docEvents";
 import { WikiLinkHighlight } from "../editor/wikiLinks";
@@ -20,6 +20,15 @@ import { relativeTo, resolveRelative } from "../editor/paths";
 import DatabaseCodeBlock from "../editor/DatabaseCodeBlock";
 import ModeToggle from "./ModeToggle";
 import { useSettings } from "../settings";
+import { resourceViewForPath, titleForPath, type TabId, type TextSelectionPosition } from "../workspace";
+import {
+  flushDocument,
+  openDocument,
+  replaceDocument,
+  restoreDocument,
+  subscribeDocument,
+  updateDocument,
+} from "../documents";
 
 /**
  * Image node that keeps a vault-relative `src` in the document (canonical
@@ -62,10 +71,22 @@ const SLASH_ITEMS: SlashItem[] = [
   { key: "database", label: "Database", hint: "table + kanban", run: () => {} }, // handled specially
 ];
 
-export default function NoteEditor({ path, active }: { path: string; active: boolean }) {
+export default function NoteEditor({
+  path,
+  tabId,
+  active,
+  selection,
+  onSelectionChange,
+}: {
+  path: string;
+  tabId: TabId;
+  active: boolean;
+  selection?: TextSelectionPosition;
+  onSelectionChange?: (selection: TextSelectionPosition) => void;
+}) {
   const setSaveStatus = useStore((s) => s.setSaveStatus);
   const setConflict = useStore((s) => s.setConflict);
-  const openTab = useStore((s) => s.openTab);
+  const openResource = useStore((s) => s.openWorkspaceResource);
   const refreshTree = useStore((s) => s.refreshTree);
   const vaultRoot = useStore((s) => s.vault?.root ?? "");
 
@@ -74,11 +95,12 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
   const [deletedBanner, setDeletedBanner] = useState(false);
 
   // Refs shared with editor callbacks (created once).
-  const versionRef = useRef<string>("");
   const frontmatterRef = useRef<string>("");
-  const dirtyRef = useRef(false);
-  const savingRef = useRef(false);
-  const saveTimer = useRef<number | null>(null);
+  const originRef = useRef(`rich-${crypto.randomUUID()}`);
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  onSelectionChangeRef.current = onSelectionChange;
   const popupRef = useRef<PopupState | null>(null);
   popupRef.current = popup;
   const pathRef = useRef(path);
@@ -223,115 +245,95 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
         if (target && (event.ctrlKey || event.metaKey || event.detail === 1)) {
           const name = target.getAttribute("data-wiki-target");
           if (name) {
-            openWikiTarget(name, openTab, refreshTree);
+            openWikiTarget(name, openResource, refreshTree);
             return true;
           }
         }
         return false;
       },
     },
-    onUpdate: () => {
+    onUpdate: ({ editor: updatedEditor }) => {
       if (!loadedRef.current) return;
-      dirtyRef.current = true;
-      scheduleSave();
+      const body = restoreWikiLinks(updatedEditor.storage.markdown.getMarkdown() as string);
+      const content = frontmatterRef.current + body + (body.endsWith("\n") ? "" : "\n");
+      updateDocument(pathRef.current, content, {
+        origin: originRef.current,
+        autosaveDelay: useSettings.getState().autosaveDelay,
+      });
+    },
+    onSelectionUpdate: ({ editor: updatedEditor }) => {
+      if (!loadedRef.current) return;
+      const { anchor, head } = updatedEditor.state.selection;
+      onSelectionChangeRef.current?.({ anchor, head });
     },
   });
 
   const loadedRef = useRef(false);
 
-  const scheduleSave = useCallback(() => {
-    if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(
-      () => void save(),
-      useSettings.getState().autosaveDelay,
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const save = useCallback(async () => {
-    if (!editor || savingRef.current || !dirtyRef.current) return;
-    savingRef.current = true;
-    setSaveStatus("saving");
-    const body = restoreWikiLinks(editor.storage.markdown.getMarkdown() as string);
-    const content = frontmatterRef.current + body + (body.endsWith("\n") ? "" : "\n");
-    try {
-      const result = await api.noteSave(pathRef.current, content, versionRef.current);
-      versionRef.current = result.version;
-      dirtyRef.current = false;
-      setSaveStatus("saved");
-    } catch (e) {
-      if (isApiError(e) && e.code === "conflict") {
-        setSaveStatus("error");
-        setConflict({ path: pathRef.current, myContent: content });
-      } else {
-        setSaveStatus("error");
-        console.error("save failed", e);
-      }
-    } finally {
-      savingRef.current = false;
-    }
-  }, [editor, setConflict, setSaveStatus]);
-
-  // Load the note when the editor is ready or path changes.
+  // Subscribe both rich and source views to one path-scoped canonical session.
   useEffect(() => {
     if (!editor) return;
     loadedRef.current = false;
     setLoaded(false);
-    api
-      .noteLoad(path)
-      .then((file) => {
-        versionRef.current = file.version;
-        const { frontmatter, body } = splitFrontmatter(file.content);
+    const unsubscribe = subscribeDocument(path, ({ snapshot, origin }) => {
+      setSaveStatus(snapshot.saveState);
+      setDeletedBanner(snapshot.deleted);
+      if (snapshot.saveError?.kind === "conflict") {
+        setConflict({ path, myContent: snapshot.content });
+      }
+      if (snapshot.loaded && origin !== originRef.current) {
+        const { frontmatter, body } = splitFrontmatter(snapshot.content);
         frontmatterRef.current = frontmatter;
+        const priorSelection = loadedRef.current
+          ? { anchor: editor.state.selection.anchor, head: editor.state.selection.head }
+          : selectionRef.current;
+        loadedRef.current = false;
         editor.commands.setContent(body, false);
-        dirtyRef.current = false;
+        if (priorSelection) {
+          const max = Math.max(1, editor.state.doc.content.size);
+          editor.commands.setTextSelection({
+            from: Math.min(max, Math.max(1, priorSelection.anchor)),
+            to: Math.min(max, Math.max(1, priorSelection.head)),
+          });
+        }
         loadedRef.current = true;
         setLoaded(true);
-      })
-      .catch((e) => console.error("load failed", e));
-  }, [editor, path]);
+      }
+    });
+    void openDocument(path).catch((e) => console.error("load failed", e));
+    return unsubscribe;
+  }, [editor, path, setConflict, setSaveStatus]);
+
+  useEffect(() => {
+    if (!editor || !loadedRef.current || !selection) return;
+    const max = Math.max(1, editor.state.doc.content.size);
+    const anchor = Math.min(max, Math.max(1, selection.anchor));
+    const head = Math.min(max, Math.max(1, selection.head));
+    if (editor.state.selection.anchor === anchor && editor.state.selection.head === head) return;
+    editor.commands.setTextSelection({ from: anchor, to: head });
+  }, [editor, selection?.anchor, selection?.head]);
 
   // React to external file events for this document.
   useEffect(() => {
     return docEvents.on(async (ev) => {
       const p = pathRef.current;
-      if (ev.type === "modified" && ev.path === p) {
-        if (dirtyRef.current) {
-          const body = restoreWikiLinks(editor?.storage.markdown.getMarkdown() as string);
-          setConflict({ path: p, myContent: frontmatterRef.current + body });
-        } else if (editor) {
-          // Clean → silent reload.
-          try {
-            const file = await api.noteLoad(p);
-            versionRef.current = file.version;
-            const { frontmatter, body } = splitFrontmatter(file.content);
-            frontmatterRef.current = frontmatter;
-            loadedRef.current = false;
-            editor.commands.setContent(body, false);
-            loadedRef.current = true;
-          } catch {
-            /* deleted between event and load */
-          }
-        }
-      } else if (ev.type === "deleted" && ev.path === p) {
-        setDeletedBanner(true);
-      } else if (ev.type === "renamed" && ev.from === p) {
-        useStore.getState().renameTab(ev.from, ev.to);
+      if (ev.type === "renamed" && ev.from === p) {
+        useStore.getState().renameWorkspaceResource(ev.from, ev.to);
       }
     });
-  }, [editor, setConflict]);
+  }, []);
 
   // Flush pending save on unmount/blur.
   useEffect(() => {
     const flush = () => {
-      if (dirtyRef.current) void save();
+      void flushDocument(pathRef.current);
     };
     window.addEventListener("blur", flush);
     return () => {
       window.removeEventListener("blur", flush);
       flush();
     };
-  }, [save]);
+  }, []);
 
   // Listen for conflict resolution outcomes that affect this document.
   useEffect(() => {
@@ -342,13 +344,7 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
         version: string;
       };
       if (detail.path === pathRef.current && editor) {
-        versionRef.current = detail.version;
-        const { frontmatter, body } = splitFrontmatter(detail.content);
-        frontmatterRef.current = frontmatter;
-        loadedRef.current = false;
-        editor.commands.setContent(body, false);
-        dirtyRef.current = false;
-        loadedRef.current = true;
+        replaceDocument(detail.path, detail.content, detail.version);
       }
     };
     window.addEventListener("mica:conflict-resolved", handler);
@@ -362,16 +358,15 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
           This file was deleted on disk.
           <button
             onClick={async () => {
-              const body = restoreWikiLinks(editor?.storage.markdown.getMarkdown() as string);
-              await api.noteSave(pathRef.current, frontmatterRef.current + body, undefined);
-              setDeletedBanner(false);
+              const result = await restoreDocument(pathRef.current);
+              if (result.ok) setDeletedBanner(false);
             }}
           >
             Restore
           </button>
           <button
             onClick={() => {
-              useStore.getState().closeTab(pathRef.current);
+              void useStore.getState().closeWorkspaceTab(tabId);
             }}
           >
             Close
@@ -379,8 +374,8 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
         </div>
       )}
       <div className="note-header">
-        <div className="note-title">{titleOfPath(path)}</div>
-        <ModeToggle path={path} />
+        <div className="note-title">{titleForPath(path)}</div>
+        <ModeToggle tabId={tabId} source={false} />
       </div>
       {editor && (
         <BubbleMenu editor={editor} tippyOptions={{ duration: 100 }}>
@@ -506,7 +501,7 @@ function suggestionRenderer<T extends PopupItem>(
 
 async function openWikiTarget(
   name: string,
-  openTab: (t: { path: string; kind: "note"; title: string }) => void,
+  openResource: ReturnType<typeof useStore.getState>["openWorkspaceResource"],
   refreshTree: () => Promise<void>,
 ) {
   try {
@@ -516,7 +511,7 @@ async function openWikiTarget(
       target = file.path;
       await refreshTree();
     }
-    openTab({ path: target, kind: "note", title: titleOfPath(target) });
+    await openResource(resourceViewForPath(target));
   } catch (e) {
     console.error("wiki open failed", e);
   }

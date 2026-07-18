@@ -1,8 +1,12 @@
 import { useStore } from "../store";
+import { resourcePath } from "../workspace";
 
 export default function StatusBar() {
   const saveStatus = useStore((s) => s.saveStatus);
-  const activePath = useStore((s) => s.activePath);
+  const activeResourcePath = useStore((s) => {
+    const pane = s.workspace.panes[s.workspace.focusedPaneId];
+    return pane ? resourcePath(s.workspace.tabs[pane.activeTabId].view) : undefined;
+  });
 
   const label =
     saveStatus === "saving"
@@ -15,7 +19,7 @@ export default function StatusBar() {
 
   return (
     <div className="status-bar">
-      <span className="muted">{activePath ?? ""}</span>
+      <span className="muted">{activeResourcePath ?? ""}</span>
       <span className={`save-status ${saveStatus}`}>{label}</span>
     </div>
   );

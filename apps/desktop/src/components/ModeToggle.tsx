@@ -1,15 +1,15 @@
 import { useStore } from "../store";
+import type { TabId } from "../workspace";
 
 /** Rich ⇄ source mode switch shown in the note header (FR-NOTE-009). */
-export default function ModeToggle({ path }: { path: string }) {
-  const sourceMode = useStore((s) => s.sourceMode[path] ?? false);
-  const toggle = useStore((s) => s.toggleSourceMode);
+export default function ModeToggle({ tabId, source }: { tabId: TabId; source: boolean }) {
+  const toggle = useStore((s) => s.toggleTabSourceMode);
   return (
     <div className="mode-toggle" title="Toggle Markdown source mode (Ctrl+E)">
-      <button className={!sourceMode ? "active" : ""} onClick={() => sourceMode && toggle(path)}>
+      <button className={!source ? "active" : ""} onClick={() => { if (source) void toggle(tabId); }}>
         Rich
       </button>
-      <button className={sourceMode ? "active" : ""} onClick={() => !sourceMode && toggle(path)}>
+      <button className={source ? "active" : ""} onClick={() => { if (!source) void toggle(tabId); }}>
         Source
       </button>
     </div>

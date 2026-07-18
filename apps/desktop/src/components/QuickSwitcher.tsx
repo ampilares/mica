@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { api, QuickSwitchHit } from "../api";
-import { useStore, titleOfPath } from "../store";
+import { useStore } from "../store";
+import { resourceViewForPath } from "../workspace";
 
 export default function QuickSwitcher() {
   const open = useStore((s) => s.quickSwitcherOpen);
   const setOpen = useStore((s) => s.setQuickSwitcherOpen);
-  const openTab = useStore((s) => s.openTab);
+  const openWorkspaceResource = useStore((s) => s.openWorkspaceResource);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<QuickSwitchHit[]>([]);
   const [selected, setSelected] = useState(0);
@@ -36,9 +37,11 @@ export default function QuickSwitcher() {
 
   if (!open) return null;
 
-  const pick = (hit: QuickSwitchHit) => {
+  const pick = (hit: QuickSwitchHit, options?: { newTab?: boolean; activate?: boolean }) => {
     if (hit.kind === "note" || hit.kind === "database" || hit.kind === "canvas") {
-      openTab({ path: hit.path, kind: hit.kind, title: titleOfPath(hit.path) });
+      openWorkspaceResource(resourceViewForPath(hit.path), options?.newTab
+        ? { newTab: true, activate: options.activate }
+        : undefined);
     }
     setOpen(false);
   };
@@ -60,7 +63,10 @@ export default function QuickSwitcher() {
               e.preventDefault();
               setSelected((s) => Math.max(s - 1, 0));
             } else if (e.key === "Enter" && hits[selected]) {
-              pick(hits[selected]);
+              pick(hits[selected], {
+                newTab: e.metaKey || e.ctrlKey,
+                activate: e.shiftKey,
+              });
             }
           }}
         />
@@ -70,7 +76,13 @@ export default function QuickSwitcher() {
               key={hit.path}
               className={`palette-item ${i === selected ? "selected" : ""}`}
               onMouseEnter={() => setSelected(i)}
-              onClick={() => pick(hit)}
+              onClick={(event) => pick(hit, {
+                newTab: event.metaKey || event.ctrlKey || event.button === 1,
+                activate: event.shiftKey,
+              })}
+              onAuxClick={(event) => {
+                if (event.button === 1) pick(hit, { newTab: true, activate: false });
+              }}
             >
               <span>
                 {hit.kind === "note" ? "📄" : hit.kind === "database" ? "🗃️" : "🗺️"}{" "}
