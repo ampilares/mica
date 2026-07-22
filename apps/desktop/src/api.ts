@@ -338,6 +338,24 @@ export const api = {
     }),
   canvasSidecarEnsure: (path: string) =>
     invoke<LoadedFile>("canvas_sidecar_ensure", { path }),
+  assetStat: (path: string) =>
+    invoke<{ size: number; mtime: string }>("asset_stat", { path }),
+  noteSection: (path: string, heading?: string) =>
+    invoke<string>("note_section", { path, heading }),
+  templateList: () =>
+    invoke<{ path: string; title: string }[]>("template_list"),
+  templateInstantiate: (template: string, title: string, dir?: string) =>
+    invoke<LoadedFile>("template_instantiate", { template, title, dir }),
+  historyList: (path: string) =>
+    invoke<{ stamp: string; size: number }[]>("history_list", { path }),
+  historyRead: (path: string, stamp: string) =>
+    invoke<string>("history_read", { path, stamp }),
+  historyRestore: (path: string, stamp: string, baseVersion: string) =>
+    invoke<{ content: string; version: string }>("history_restore", {
+      path,
+      stamp,
+      baseVersion,
+    }),
 
   searchQuery: (query: string, limit?: number) =>
     invoke<SearchHit[]>("search_query", { query, limit }),

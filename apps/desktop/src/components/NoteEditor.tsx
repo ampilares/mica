@@ -18,6 +18,11 @@ import { WikiLinkHighlight } from "../editor/wikiLinks";
 import SuggestionPopup, { PopupState, PopupItem } from "../editor/SuggestionPopup";
 import { relativeTo, resolveRelative } from "../editor/paths";
 import DatabaseCodeBlock from "../editor/DatabaseCodeBlock";
+import { Callout } from "../editor/callout";
+import { Toggle } from "../editor/toggle";
+import { tableExtensions } from "../editor/tableBlock";
+import { MathInline, MathBlock } from "../editor/math";
+import "../editor/blocks.css";
 import { useSettings } from "../settings";
 
 /**
@@ -58,6 +63,51 @@ const SLASH_ITEMS: SlashItem[] = [
   { key: "quote", label: "Quote", run: (e, r) => e.chain().focus().deleteRange(r).toggleBlockquote().run() },
   { key: "code", label: "Code block", run: (e, r) => e.chain().focus().deleteRange(r).setCodeBlock().run() },
   { key: "divider", label: "Divider", run: (e, r) => e.chain().focus().deleteRange(r).setHorizontalRule().run() },
+  // FR21-BLK-001..004: block types with lossless Markdown round-trip.
+  {
+    key: "callout",
+    label: "Callout",
+    hint: "note / info / tip…",
+    run: (e, r) =>
+      e
+        .chain()
+        .focus()
+        .deleteRange(r)
+        .insertContent({ type: "callout", attrs: { kind: "info", title: "" }, content: [{ type: "paragraph" }] })
+        .run(),
+  },
+  {
+    key: "toggle",
+    label: "Toggle list",
+    hint: "collapsible",
+    run: (e, r) =>
+      e
+        .chain()
+        .focus()
+        .deleteRange(r)
+        .insertContent({ type: "toggle", attrs: { title: "" }, content: [{ type: "paragraph" }] })
+        .run(),
+  },
+  {
+    key: "table",
+    label: "Table",
+    hint: "3×3 GFM",
+    run: (e, r) => e.chain().focus().deleteRange(r).insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run(),
+  },
+  {
+    key: "math",
+    label: "Math block",
+    hint: "$$ LaTeX $$",
+    run: (e, r) =>
+      e.chain().focus().deleteRange(r).insertContent({ type: "mathBlock", attrs: { latex: "" } }).run(),
+  },
+  {
+    key: "math-inline",
+    label: "Inline math",
+    hint: "$ LaTeX $",
+    run: (e, r) =>
+      e.chain().focus().deleteRange(r).insertContent({ type: "mathInline", attrs: { latex: "" } }).run(),
+  },
   { key: "database", label: "Database", hint: "table + kanban", run: () => {} }, // handled specially
 ];
 
@@ -87,6 +137,12 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
     extensions: [
       StarterKit.configure({ codeBlock: false }),
       DatabaseCodeBlock(path),
+      // FR21-BLK-001..004 block types.
+      Callout,
+      Toggle,
+      ...tableExtensions,
+      MathInline,
+      MathBlock,
       TaskList,
       TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false }),

@@ -1,0 +1,204 @@
+/* Editor blocks I (FR21-BLK-001..004). All colors via CSS tokens so the blocks
+   look right in both light and dark themes. */
+
+/* ---- Callout (FR21-BLK-001) ---- */
+.callout {
+  margin: 0.6em 0;
+  padding: 0.5em 0.8em;
+  border-left: 3px solid var(--callout-accent, var(--accent));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--callout-accent, var(--accent)) 8%, transparent);
+}
+.callout[data-kind="note"] {
+  --callout-accent: var(--text-muted);
+}
+.callout[data-kind="info"] {
+  --callout-accent: var(--accent);
+}
+.callout[data-kind="tip"] {
+  --callout-accent: var(--success);
+}
+.callout[data-kind="warning"] {
+  --callout-accent: #c98a12;
+  background: color-mix(in srgb, var(--warning-bg) 60%, transparent);
+}
+.callout[data-kind="danger"] {
+  --callout-accent: var(--danger);
+}
+.callout[data-kind="quote"] {
+  --callout-accent: var(--border-strong);
+}
+.callout-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  margin-bottom: 0.2em;
+}
+.callout-icon {
+  color: var(--callout-accent, var(--accent));
+  font-size: 0.95em;
+  line-height: 1;
+}
+.callout-kind {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--callout-accent, var(--accent));
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 4px;
+  cursor: pointer;
+}
+.callout-title {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.95em;
+  padding: 0;
+  outline: none;
+}
+.callout-title::placeholder {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.callout-body > :first-child {
+  margin-top: 0;
+}
+.callout-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- Toggle list (FR21-BLK-002) ---- */
+.toggle {
+  margin: 0.4em 0;
+}
+.toggle-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  list-style: none;
+  cursor: default;
+}
+/* Hide the native disclosure triangle; we render our own chevron. */
+.toggle-summary::-webkit-details-marker,
+.toggle-summary::marker {
+  display: none;
+}
+.toggle-chevron {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 0.85em;
+  width: 1.2em;
+  padding: 0;
+  line-height: 1;
+}
+.toggle-chevron:hover {
+  color: var(--text);
+}
+.toggle-title {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-weight: 500;
+  padding: 0;
+  outline: none;
+}
+.toggle-title::placeholder {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+.toggle-body {
+  margin-left: 1.3em;
+  padding-left: 0.6em;
+  border-left: 1px solid var(--border);
+}
+.toggle-body > :first-child {
+  margin-top: 0.2em;
+}
+
+/* ---- Tables (FR21-BLK-003) ---- */
+.note-editor-content table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  width: auto;
+  overflow: hidden;
+}
+.note-editor-content table td,
+.note-editor-content table th {
+  border: 1px solid var(--border-strong);
+  padding: 4px 8px;
+  vertical-align: top;
+  text-align: left;
+  min-width: 3em;
+}
+.note-editor-content table th {
+  background: var(--bg-hover);
+  font-weight: 600;
+}
+.note-editor-content table .selectedCell::after {
+  background: var(--accent-soft);
+  content: "";
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  z-index: 2;
+}
+.note-editor-content table .column-resize-handle {
+  background: var(--accent);
+  bottom: -2px;
+  position: absolute;
+  right: -2px;
+  top: 0;
+  width: 3px;
+}
+
+/* ---- Math (FR21-BLK-004) ---- */
+.math-inline {
+  cursor: pointer;
+  padding: 0 1px;
+  border-radius: 3px;
+}
+.math-inline:hover {
+  background: var(--accent-soft);
+}
+.math-block {
+  cursor: pointer;
+  display: block;
+  margin: 0.6em 0;
+  padding: 0.4em 0.6em;
+  text-align: center;
+  border-radius: var(--radius-sm);
+}
+.math-block:hover {
+  background: var(--bg-hover);
+}
+.math-error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-radius: 3px;
+  padding: 0 3px;
+  font-family: var(--mono-font);
+  font-size: 0.9em;
+}
+.math-input {
+  font-family: var(--mono-font);
+  font-size: 0.9em;
+  color: var(--text);
+  background: var(--bg-raised);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 2px 5px;
+  outline: none;
+}
+.math-input-block {
+  display: block;
+  width: 100%;
+  margin: 0.4em 0;
+  resize: vertical;
+}

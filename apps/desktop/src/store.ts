@@ -17,7 +17,7 @@ export interface OpenTab {
 }
 
 export type DocMode = "page" | "edgeless";
-export type RightPanelTab = "outline" | "info" | "calendar" | "frames";
+export type RightPanelTab = "outline" | "info" | "calendar" | "frames" | "history";
 
 export interface ConflictState {
   path: string;

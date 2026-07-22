@@ -11,9 +11,11 @@ pub mod frontmatter;
 pub mod meta;
 pub mod note;
 pub mod rewrite;
+pub mod section;
 
 pub use extract::{extract_metadata, ExtractedLink, LinkKind, NoteMetadata};
 pub use frontmatter::Frontmatter;
 pub use meta::{apply_meta_patch, frontmatter_json};
 pub use note::{split_frontmatter, NoteDocument};
 pub use rewrite::rewrite_links;
+pub use section::section;

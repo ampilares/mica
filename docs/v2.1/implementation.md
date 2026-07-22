@@ -141,4 +141,22 @@ decrypts nothing without client key).
 - Manual QA checklist per phase appended to this file's status log.
 
 ## 4. Status log
-- 2026-07-22 — v2.1 plan adopted. Execution not started.
+- 2026-07-22 — v2.1 plan adopted.
+- 2026-07-22 — Wave 1 complete (C1 + C5 + C7 + backend enablers):
+  - Backend: history module (debounced/deduped snapshots, prune budgets,
+    traversal-safe reads, force-snapshot before restore), template
+    list/instantiate with `{{title}}/{{date}}/{{time}}/{{date:FMT}}`,
+    `note_section` heading slicing, `asset_stat`, snapshot hook in every
+    save, HTML-block text now indexed (toggle summaries searchable).
+  - C1: callout/toggle/table/math blocks with byte-exact round-trip
+    (tools/e2e/blocks.e2e.mjs 15/15; docs/compat/blocks.md smoke doc).
+    tiptap-markdown's built-in GFM table serializer confirmed sufficient.
+  - C5: TemplatePicker (template/ask modes), quick-search + sidebar entry
+    points, `default_new_doc` setting honored by the New-doc button.
+  - C7: History right-panel tab (diff vs current via diff.ts, confirm-gated
+    restore through the conflict-safe path, docEvents reload).
+  - Verified live: backend 45/45, UI 27/27, blocks 15/15, wave-1 probe 9/9
+    (template substitution, snapshot/restore round-trip incl. pre-restore
+    snapshot, panel rendering). cargo test, tsc, build all green.
+- Next: C2 (attachments/link cards/embeds), C3 (wiki embeds + hover
+  previews), C4 (split/peek), C6 (edgeless depth), C8–C9, P-track.

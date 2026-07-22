@@ -37,6 +37,8 @@ export default function SettingsDialog() {
   const [config, setConfig] = useState<VaultConfig | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [section, setSection] = useState<Section>("appearance");
+  // FR21-TPL: templates offered by the "New doc default" select.
+  const [templates, setTemplates] = useState<{ path: string; title: string }[]>([]);
 
   useEffect(() => {
     if (open) {
@@ -44,6 +46,10 @@ export default function SettingsDialog() {
         .configGet()
         .then(setConfig)
         .catch(() => setConfig(null));
+      api
+        .templateList()
+        .then(setTemplates)
+        .catch(() => setTemplates([]));
       setSaveError(null);
       setSection("appearance");
     }
@@ -188,6 +194,27 @@ export default function SettingsDialog() {
                     value={settings.autosaveDelay}
                     onChange={(e) => settings.set({ autosaveDelay: Number(e.target.value) || 1000 })}
                   />
+                </label>
+                {/* FR21-TPL: persisted in workspace config (`default_new_doc`). */}
+                <label className="sd-row">
+                  <span className="sd-row-label">
+                    <strong>New doc default</strong>
+                    <small>What the sidebar's New doc button creates.</small>
+                  </span>
+                  <select
+                    value={config ? String(config.default_new_doc ?? "page") : "page"}
+                    disabled={!config}
+                    onChange={(e) => void patchConfig({ default_new_doc: e.target.value })}
+                  >
+                    <option value="page">Blank page</option>
+                    <option value="edgeless">Blank edgeless</option>
+                    <option value="ask">Ask each time</option>
+                    {templates.map((t) => (
+                      <option key={t.path} value={`template:${t.path}`}>
+                        Template: {t.title}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               </section>
             )}

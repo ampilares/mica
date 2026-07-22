@@ -177,6 +177,16 @@ export default function DocHeader({ path }: { path: string }) {
             )}
             {isNote && (
               <button
+                onClick={() => {
+                  setMenuOpen(false);
+                  setRightPanelTab("history");
+                }}
+              >
+                History
+              </button>
+            )}
+            {isNote && (
+              <button
                 onClick={async () => {
                   setMenuOpen(false);
                   const file = await api.noteLoad(path);

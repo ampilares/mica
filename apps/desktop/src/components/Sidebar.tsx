@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, FileNode } from "../api";
 import { useStore, kindOfPath, titleOfPath, journalPath } from "../store";
 import { useWorkspaceMeta } from "../workspaceMeta";
+import TemplatePicker from "./TemplatePicker";
 
 /** AFFiNE-style app sidebar (FR2-NAV-001): quick search, All docs, Journals,
  * Collections, Tags, Favorites, Organize (file tree), Trash. */
@@ -22,6 +23,9 @@ export default function Sidebar() {
   const [collectionsOpen, setCollectionsOpen] = useState(true);
   const [organizeOpen, setOrganizeOpen] = useState(true);
   const [newMenuOpen, setNewMenuOpen] = useState(false);
+  // FR21-TPL: template picker modal — "template" lists templates, "ask" also
+  // offers blank page/edgeless rows.
+  const [pickerMode, setPickerMode] = useState<null | "template" | "ask">(null);
 
   useEffect(() => {
     refreshTree();
@@ -58,6 +62,46 @@ export default function Sidebar() {
     await refreshTree();
     refreshDocs();
     openDoc(file.path);
+  };
+
+  // FR21-TPL: honor the `default_new_doc` workspace config for the plain
+  // "＋ New doc" button — page (default), edgeless, ask, or a named template.
+  const newDocDefault = async () => {
+    let def = "page";
+    try {
+      const cfg = await api.configGet();
+      if (typeof cfg.default_new_doc === "string" && cfg.default_new_doc) {
+        def = cfg.default_new_doc;
+      }
+    } catch {
+      /* fall back to a blank page */
+    }
+    if (def === "ask") {
+      setPickerMode("ask");
+      return;
+    }
+    if (def === "edgeless") {
+      const title = prompt("New doc title", "Untitled");
+      if (!title) return;
+      const file = await api.noteCreate(title);
+      await refreshTree();
+      refreshDocs();
+      openDoc(file.path);
+      await useStore.getState().setDocMode(file.path, "edgeless");
+      return;
+    }
+    if (def.startsWith("template:")) {
+      const tpl = def.slice("template:".length);
+      const title = prompt("New doc title", "Untitled");
+      if (!title) return;
+      const file = await api.templateInstantiate(tpl, title);
+      await refreshTree();
+      refreshDocs();
+      openDoc(file.path);
+      return;
+    }
+    // "page" (default): blank note.
+    await createDoc("note");
   };
 
   const tagCounts = new Map<string, number>();
@@ -198,7 +242,7 @@ export default function Sidebar() {
           <span className="nav-icon">🗑</span> Trash
         </button>
         <div className="new-doc-row">
-          <button className="new-doc-button" onClick={() => void createDoc("note")}>
+          <button className="new-doc-button" onClick={() => void newDocDefault()}>
             ＋ New doc
           </button>
           <button
@@ -213,10 +257,24 @@ export default function Sidebar() {
               <button onClick={() => void createDoc("note")}>New doc</button>
               <button onClick={() => void createDoc("canvas")}>New whiteboard</button>
               <button onClick={() => void createDoc("database")}>New database</button>
+              <button
+                onClick={() => {
+                  setNewMenuOpen(false);
+                  setPickerMode("template");
+                }}
+              >
+                From template…
+              </button>
             </div>
           )}
         </div>
       </div>
+
+      <TemplatePicker
+        open={pickerMode !== null}
+        mode={pickerMode ?? "template"}
+        onClose={() => setPickerMode(null)}
+      />
     </div>
   );
 }

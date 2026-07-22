@@ -128,6 +128,20 @@ pub fn extract_metadata(content: &str, fallback_title: &str) -> NoteMetadata {
                 plain.push(' ');
             }
             Event::SoftBreak | Event::HardBreak => plain.push(' '),
+            // HTML blocks (e.g. <details><summary>Title</summary> toggles,
+            // FR21-BLK-002): index their text content, tags stripped.
+            Event::Html(h) | Event::InlineHtml(h) => {
+                let mut in_tag = false;
+                for c in h.chars() {
+                    match c {
+                        '<' => in_tag = true,
+                        '>' => in_tag = false,
+                        c if !in_tag => plain.push(c),
+                        _ => {}
+                    }
+                }
+                plain.push(' ');
+            }
             _ => {}
         }
     }
@@ -202,6 +216,16 @@ mod tests {
             .any(|l| l.kind == LinkKind::Markdown && l.target == "../notes/doc.md"));
         assert!(!meta.links.iter().any(|l| l.target.contains("example.com")));
         assert!(meta.plain_text.contains("Work on"));
+    }
+
+    #[test]
+    fn html_block_text_is_indexed() {
+        let meta = extract_metadata(
+            "<details><summary>Hidden treasure</summary>\n\ninner text\n\n</details>\n",
+            "f",
+        );
+        assert!(meta.plain_text.contains("Hidden treasure"));
+        assert!(meta.plain_text.contains("inner text"));
     }
 
     #[test]

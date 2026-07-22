@@ -2223,6 +2223,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
 ]
 
 [[package]]

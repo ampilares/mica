@@ -4,6 +4,7 @@ import { useStore, kindOfPath } from "../store";
 import { docEvents } from "../docEvents";
 import InfoPanel from "./InfoPanel";
 import JournalCalendar from "./JournalCalendar";
+import HistoryPanel from "./HistoryPanel";
 
 /** Right sidebar container (spec §3.3): Outline / Info / Calendar panels. */
 export default function RightSidebar() {
@@ -20,9 +21,11 @@ export default function RightSidebar() {
             ? "Outline"
             : tab === "info"
               ? "Info"
-              : tab === "calendar"
-                ? "Journal"
-                : "Frames"}
+              : tab === "history"
+                ? "History"
+                : tab === "calendar"
+                  ? "Journal"
+                  : "Frames"}
         </span>
         <button
           className="icon-button"
@@ -38,8 +41,11 @@ export default function RightSidebar() {
       {tab === "info" && activePath && kindOfPath(activePath) === "note" && (
         <InfoPanel path={activePath} />
       )}
+      {tab === "history" && activePath && kindOfPath(activePath) === "note" && (
+        <HistoryPanel path={activePath} />
+      )}
       {tab === "calendar" && <JournalCalendar />}
-      {(tab === "outline" || tab === "info") &&
+      {(tab === "outline" || tab === "info" || tab === "history") &&
         (!activePath || kindOfPath(activePath) !== "note") && (
           <p className="muted small pad">Open a doc to see this panel.</p>
         )}

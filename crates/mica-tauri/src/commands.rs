@@ -85,6 +85,22 @@ fn open_vault_inner(app: &AppHandle, state: &AppState, vault: Vault) -> ApiResul
         })?
     };
 
+    // History budgets (FR21-HIS-001): prune on open, config-overridable.
+    {
+        let extra = &vault.config().extra;
+        let max_per_file = extra
+            .get("history_max_per_file")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50) as usize;
+        let max_age_days = extra
+            .get("history_max_age_days")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(90);
+        if let Err(e) = vault.history_prune(max_per_file, max_age_days) {
+            tracing::warn!("history prune failed: {e}");
+        }
+    }
+
     let info = VaultInfo {
         root: vault.root().display().to_string(),
         name: vault.config().name.clone(),
@@ -199,7 +215,26 @@ fn guarded_write(
     if let Err(e) = open.index.lock().unwrap().update_file(&open.vault, path) {
         tracing::warn!("index update after save failed: {e}");
     }
+    // Local history snapshot (FR21-HIS-001): debounced/deduped in the vault.
+    if let Err(e) = open.vault.history_snapshot(path, content, false) {
+        tracing::warn!("history snapshot failed: {e}");
+    }
     Ok(hash)
+}
+
+/// File-name stem for a new note per the vault naming strategy (FR-SET-003).
+fn stem_for_title(config: &mica_vault::VaultConfig, title: &str) -> String {
+    if config.naming == "title" {
+        let cleaned: String = title
+            .trim()
+            .chars()
+            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { ' ' } else { c })
+            .collect();
+        let cleaned = cleaned.trim().to_string();
+        if cleaned.is_empty() { slugify(title) } else { cleaned }
+    } else {
+        slugify(title)
+    }
 }
 
 #[tauri::command]
@@ -212,17 +247,7 @@ pub fn note_create(
     let config = open.vault.config();
     let dir = dir.unwrap_or_else(|| config.notes_dir.clone());
     // Naming strategy (FR-SET): kebab-case slug (default) or title verbatim.
-    let stem = if config.naming == "title" {
-        let cleaned: String = title
-            .trim()
-            .chars()
-            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { ' ' } else { c })
-            .collect();
-        let cleaned = cleaned.trim().to_string();
-        if cleaned.is_empty() { slugify(&title) } else { cleaned }
-    } else {
-        slugify(&title)
-    };
+    let stem = stem_for_title(&config, &title);
     let path = open
         .vault
         .unique_path(&dir, &stem, "md")
@@ -1165,6 +1190,230 @@ fn journal_title(date: &str) -> String {
     );
     let day = if day.is_empty() { "1" } else { day };
     format!("{} {day}, {year}", MONTHS[month - 1])
+}
+
+// ------------------------------------------------- v2.1 free-tier core ----
+
+/// File metadata for attachment cards (FR21-BLK-005).
+#[derive(Debug, Serialize)]
+pub struct AssetStat {
+    pub size: u64,
+    pub mtime: String,
+}
+
+#[tauri::command]
+pub fn asset_stat(state: State<'_, AppState>, path: String) -> ApiResult<AssetStat> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let abs = open.vault.abs(&rel);
+    let meta = std::fs::metadata(&abs).map_err(|e| ApiError::from(CoreError::io(&abs, e)))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| mica_core::rfc3339_from_unix(d.as_secs() as i64))
+        .unwrap_or_default();
+    Ok(AssetStat {
+        size: meta.len(),
+        mtime,
+    })
+}
+
+/// Markdown slice for wiki embeds (FR21-BLK-008): whole body, or the section
+/// under `heading`. Missing headings surface as an error the embed renders.
+#[tauri::command]
+pub fn note_section(
+    state: State<'_, AppState>,
+    path: String,
+    heading: Option<String>,
+) -> ApiResult<String> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let (content, _) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    mica_markdown::section(&content, heading.as_deref()).ok_or_else(|| ApiError {
+        code: "heading_not_found".into(),
+        message: format!("heading not found: {}", heading.unwrap_or_default()),
+        path: Some(path),
+    })
+}
+
+// ------------------------------------------------------------- templates ----
+
+#[derive(Debug, Serialize)]
+pub struct TemplateInfo {
+    pub path: VaultPath,
+    pub title: String,
+}
+
+/// Every `.md` under `templates/` is a template (FR21-TPL-001).
+#[tauri::command]
+pub fn template_list(state: State<'_, AppState>) -> ApiResult<Vec<TemplateInfo>> {
+    let open = state.current().map_err(ApiError::from)?;
+    let dir = open.vault.root().join("templates");
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(&dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let Ok(rel) = VaultPath::from_absolute(open.vault.root(), entry.path()) else {
+            continue;
+        };
+        if rel.extension() != Some("md") {
+            continue;
+        }
+        let title = open
+            .vault
+            .read_text(&rel)
+            .ok()
+            .and_then(|(c, _)| mica_markdown::extract_metadata(&c, rel.stem()).title)
+            .unwrap_or_else(|| rel.stem().to_string());
+        out.push(TemplateInfo { path: rel, title });
+    }
+    out.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    Ok(out)
+}
+
+/// `{{title}}`, `{{date}}`, `{{time}}`, `{{date:FMT}}` substitution
+/// (FR21-TPL-003). FMT tokens: YYYY, MMM, MM, DD, D.
+fn substitute_template_vars(body: &str, title: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let now = mica_core::now_rfc3339(); // YYYY-MM-DDTHH:MM:SS…
+    let (y, mo, d, hh, mi) = (
+        &now[0..4],
+        &now[5..7],
+        &now[8..10],
+        &now[11..13],
+        &now[14..16],
+    );
+    let month_idx = mo.parse::<usize>().unwrap_or(1).clamp(1, 12) - 1;
+    let day_short = d.trim_start_matches('0');
+    let day_short = if day_short.is_empty() { "1" } else { day_short };
+
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let token = after[..end].trim();
+        let replacement = match token {
+            "title" => title.to_string(),
+            "date" => format!("{y}-{mo}-{d}"),
+            "time" => format!("{hh}:{mi}"),
+            _ => match token.strip_prefix("date:") {
+                Some(fmt) => fmt
+                    .replace("YYYY", y)
+                    .replace("MMM", MONTHS[month_idx])
+                    .replace("MM", mo)
+                    .replace("DD", d)
+                    .replace('D', day_short),
+                None => format!("{{{{{token}}}}}"), // unknown token: verbatim
+            },
+        };
+        out.push_str(&replacement);
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// New doc from a template (FR21-TPL): fresh id, given title, substituted
+/// body; file named by the vault naming strategy.
+#[tauri::command]
+pub fn template_instantiate(
+    state: State<'_, AppState>,
+    template: String,
+    title: String,
+    dir: Option<String>,
+) -> ApiResult<LoadedFile> {
+    let open = state.current().map_err(ApiError::from)?;
+    let config = open.vault.config();
+    let tpl_path = VaultPath::new(&template).map_err(ApiError::from)?;
+    let (tpl_content, _) = open.vault.read_text(&tpl_path).map_err(ApiError::from)?;
+
+    let mut doc = NoteDocument::parse(&tpl_content).map_err(ApiError::from)?;
+    doc.body = substitute_template_vars(&doc.body, &title);
+    let mut fm = doc.frontmatter.take().unwrap_or_default();
+    let now = mica_core::now_rfc3339();
+    fm.set_str(
+        "id",
+        &mica_core::RecordId::new(mica_core::IdKind::Note).to_string(),
+    );
+    fm.set_str("title", &title);
+    fm.set_str("created", &now);
+    fm.set_str("updated", &now);
+    fm.set_u32("schema_version", mica_core::NOTE_SCHEMA_VERSION);
+    doc.frontmatter = Some(fm);
+    doc.raw_frontmatter = None;
+    let content = doc.serialize().map_err(ApiError::from)?;
+
+    let dir = dir.unwrap_or_else(|| config.notes_dir.clone());
+    let path = open
+        .vault
+        .unique_path(&dir, &stem_for_title(&config, &title), "md")
+        .map_err(ApiError::from)?;
+    let version = guarded_write(&open, &path, &content, None)?;
+    Ok(LoadedFile {
+        path,
+        content,
+        version,
+    })
+}
+
+// --------------------------------------------------------------- history ----
+
+#[tauri::command]
+pub fn history_list(
+    state: State<'_, AppState>,
+    path: String,
+) -> ApiResult<Vec<mica_vault::HistoryEntry>> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    open.vault.history_list(&rel).map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn history_read(
+    state: State<'_, AppState>,
+    path: String,
+    stamp: String,
+) -> ApiResult<String> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    open.vault.history_read(&rel, &stamp).map_err(ApiError::from)
+}
+
+/// Restore a snapshot (FR21-HIS-002). The current on-disk state is
+/// force-snapshotted first so a restore can itself be undone.
+#[tauri::command]
+pub fn history_restore(
+    state: State<'_, AppState>,
+    path: String,
+    stamp: String,
+    base_version: String,
+) -> ApiResult<MetaSetOutcome> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let snapshot = open.vault.history_read(&rel, &stamp).map_err(ApiError::from)?;
+    let (current, disk_version) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    if disk_version.as_str() != base_version {
+        return Err(ApiError::from(CoreError::Conflict { path: rel }));
+    }
+    if let Err(e) = open.vault.history_snapshot(&rel, &current, true) {
+        tracing::warn!("pre-restore snapshot failed: {e}");
+    }
+    let version = guarded_write(&open, &rel, &snapshot, Some(disk_version.as_str()))?;
+    Ok(MetaSetOutcome {
+        content: snapshot,
+        version,
+    })
 }
 
 // ----------------------------------------------------------------- trash ----
