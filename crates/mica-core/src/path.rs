@@ -110,6 +110,20 @@ impl VaultPath {
         self.0 == prefix.0 || self.0.starts_with(&format!("{}/", prefix.0))
     }
 
+    /// Whether this is a doc's edgeless sidecar canvas (`<stem>.canvas.drawio`,
+    /// spec §1.2). Sidecars are reachable through their doc and hidden from
+    /// doc listings, quick search, and the index.
+    pub fn is_sidecar_canvas(&self) -> bool {
+        self.0.ends_with(".canvas.drawio")
+    }
+
+    /// The edgeless sidecar canvas path for a `.md` doc (spec §1.2), or None
+    /// for non-markdown paths.
+    pub fn sidecar_canvas(&self) -> Option<VaultPath> {
+        let stem_path = self.0.strip_suffix(".md")?;
+        Some(VaultPath(format!("{stem_path}.canvas.drawio")))
+    }
+
     pub fn extension(&self) -> Option<&str> {
         let name = self.file_name();
         if name.ends_with(".database.json") {

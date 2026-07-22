@@ -18,7 +18,6 @@ import { WikiLinkHighlight } from "../editor/wikiLinks";
 import SuggestionPopup, { PopupState, PopupItem } from "../editor/SuggestionPopup";
 import { relativeTo, resolveRelative } from "../editor/paths";
 import DatabaseCodeBlock from "../editor/DatabaseCodeBlock";
-import ModeToggle from "./ModeToggle";
 import { useSettings } from "../settings";
 
 /**
@@ -380,7 +379,6 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
       )}
       <div className="note-header">
         <div className="note-title">{titleOfPath(path)}</div>
-        <ModeToggle path={path} />
       </div>
       {editor && (
         <BubbleMenu editor={editor} tippyOptions={{ duration: 100 }}>

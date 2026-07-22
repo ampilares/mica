@@ -43,6 +43,27 @@ impl Frontmatter {
         self.map.insert(Value::from(key), Value::from(value));
     }
 
+    pub fn set_value(&mut self, key: &str, value: Value) {
+        self.map.insert(Value::from(key), value);
+    }
+
+    pub fn remove(&mut self, key: &str) {
+        self.map.remove(Value::from(key));
+    }
+
+    /// Frontmatter as a JSON object (for the Info panel / `note_meta_get`).
+    /// Keys that aren't strings or values that don't map to JSON are skipped.
+    pub fn to_json(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut out = serde_json::Map::new();
+        for (k, v) in &self.map {
+            let Some(key) = k.as_str() else { continue };
+            if let Ok(val) = serde_json::to_value(v) {
+                out.insert(key.to_string(), val);
+            }
+        }
+        out
+    }
+
     /// Tags from frontmatter: supports both a YAML list and a comma string.
     pub fn tags(&self) -> Vec<String> {
         match self.map.get(Value::from("tags")) {

@@ -30,6 +30,11 @@ pub struct NoteMetadata {
     pub tags: Vec<String>,
     pub aliases: Vec<String>,
     pub links: Vec<ExtractedLink>,
+    /// Frontmatter `created` / `updated` timestamps, verbatim.
+    pub created: Option<String>,
+    pub updated: Option<String>,
+    /// Frontmatter `journal` date (ISO `YYYY-MM-DD`) for journal docs.
+    pub journal: Option<String>,
     /// Plain text of the body (markup stripped) for full-text search.
     pub plain_text: String,
 }
@@ -57,6 +62,9 @@ pub fn extract_metadata(content: &str, fallback_title: &str) -> NoteMetadata {
             meta.title = fm.title().map(String::from);
             meta.tags = fm.tags();
             meta.aliases = fm.aliases();
+            meta.created = fm.get_str("created").map(String::from);
+            meta.updated = fm.get_str("updated").map(String::from);
+            meta.journal = fm.get_str("journal").map(String::from);
         }
     }
 

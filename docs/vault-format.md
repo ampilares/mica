@@ -11,8 +11,10 @@ MyVault/
   notes/                    # defaults — you may organize files anywhere
   databases/
   canvases/
+  journals/                 # daily docs: journals/YYYY-MM-DD.md
   assets/
   templates/
+  .trash/                   # trashed files (moved, not copied) + .meta.json
   .workspace/
     config.json             # vault settings (kept)
     backups/                # snapshots (kept)
@@ -111,6 +113,39 @@ mxCell*`) that opens visually in draw.io. Mica-specific data rides in
 - Cell order is z-order; attribute order and indentation are fixed.
 - An invalid `.drawio` on disk is surfaced as an error and never overwritten.
 - Unknown cells and attributes from foreign draw.io files are preserved.
+
+### Edgeless sidecars — `<doc>.canvas.drawio`
+
+A doc's Edgeless mode stores its canvas next to the doc: `notes/foo.md` ↔
+`notes/foo.canvas.drawio` (same format as any canvas, with a `note-link` cell
+pointing at the doc). Sidecars rename, trash, restore, and duplicate together
+with their doc, are hidden from doc listings and search, and open normally in
+draw.io.
+
+## Trash — `.trash/`
+
+"Move to trash" renames a file into `.trash/<original-relative-path>` (atomic
+on the same volume — never copy-delete). `.trash/.meta.json` records each
+entry's original path and deletion time so Restore can put it back,
+auto-renaming on collision. Empty-trash permanently deletes. `.trash/` is
+invisible to the file tree, the watcher, and the search index. If the vault is
+in Git, consider adding `.trash/` to `.gitignore`.
+
+## Workspace metadata — `.workspace/config.json`
+
+Besides vault settings, the config file holds AFFiNE-style workspace metadata
+as plain JSON keys (unknown keys always survive round-trips):
+
+- `favorites`: ordered list of vault-relative paths.
+- `collections`: `{ id, name, docs[], rules[] }` — rules are
+  `{ kind: "tag" | "title_contains", value }`; a collection shows its manual
+  docs plus docs matching all rules.
+- `tag_colors`: tag → color-name map.
+- `journal_template`: vault-relative path whose body seeds new journal docs.
+
+Journal docs are `journals/YYYY-MM-DD.md` with a `journal: YYYY-MM-DD`
+frontmatter key. Docs may also carry `primary_mode: page | edgeless` and a
+`properties:` map of scalar user-defined properties (shown in the Info panel).
 
 ## Versioning
 

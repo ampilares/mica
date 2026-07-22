@@ -81,6 +81,27 @@ export interface LinkGraph {
   edges: { source: string; target: string }[];
 }
 
+/** Mirror of mica-search DocMeta (spec §2.1). */
+export interface DocMeta {
+  path: string;
+  title: string;
+  kind: FileKind;
+  created?: string | null;
+  updated: string;
+  tags: string[];
+  journal?: string | null;
+  has_canvas: boolean;
+}
+
+/** Mirror of mica-vault TrashEntry (spec §2.2). */
+export interface TrashEntry {
+  trash_path: string;
+  original: string;
+  deleted: string;
+  title: string;
+  kind: FileKind;
+}
+
 export type VaultEvent =
   | { type: "created"; path: string }
   | { type: "modified"; path: string }
@@ -300,6 +321,23 @@ export const api = {
     invoke<void>("canvas_export", { path, format, dest }),
   exportFile: (dest: string, dataBase64: string) =>
     invoke<void>("export_file", { dest, dataBase64 }),
+
+  docsList: () => invoke<DocMeta[]>("docs_list"),
+  journalEnsure: (date: string) => invoke<LoadedFile>("journal_ensure", { date }),
+  trashMove: (path: string) => invoke<string[]>("trash_move", { path }),
+  trashList: () => invoke<TrashEntry[]>("trash_list"),
+  trashRestore: (trashPath: string) => invoke<string>("trash_restore", { trashPath }),
+  trashPurge: (trashPath?: string) => invoke<number>("trash_purge", { trashPath }),
+  noteMetaGet: (path: string) =>
+    invoke<Record<string, unknown>>("note_meta_get", { path }),
+  noteMetaSet: (path: string, patch: Record<string, unknown>, baseVersion: string) =>
+    invoke<{ content: string; version: string }>("note_meta_set", {
+      path,
+      patch,
+      baseVersion,
+    }),
+  canvasSidecarEnsure: (path: string) =>
+    invoke<LoadedFile>("canvas_sidecar_ensure", { path }),
 
   searchQuery: (query: string, limit?: number) =>
     invoke<SearchHit[]>("search_query", { query, limit }),

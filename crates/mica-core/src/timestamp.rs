@@ -10,3 +10,12 @@ pub fn now_rfc3339() -> String {
     now.format(&Rfc3339)
         .unwrap_or_else(|_| String::from("1970-01-01T00:00:00Z"))
 }
+
+/// Unix seconds → RFC 3339 (UTC). Used for filesystem-mtime fallbacks where
+/// no frontmatter timestamp exists.
+pub fn rfc3339_from_unix(secs: i64) -> String {
+    OffsetDateTime::from_unix_timestamp(secs)
+        .ok()
+        .and_then(|t| t.format(&Rfc3339).ok())
+        .unwrap_or_else(|| String::from("1970-01-01T00:00:00Z"))
+}

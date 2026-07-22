@@ -1,4 +1,5 @@
-import { useStore } from "../store";
+import { useStore, kindOfPath } from "../store";
+import { iconOf } from "./Sidebar";
 
 export default function Tabs() {
   const tabs = useStore((s) => s.tabs);
@@ -10,28 +11,47 @@ export default function Tabs() {
 
   return (
     <div className="tabs">
-      {tabs.map((tab) => (
-        <div
-          key={tab.path}
-          className={`tab ${tab.path === activePath ? "active" : ""}`}
-          onClick={() => setActive(tab.path)}
-          title={tab.path}
-        >
-          <span className="tab-title">{tab.title}</span>
-          <button
-            className="tab-close"
-            onClick={(e) => {
-              e.stopPropagation();
-              closeTab(tab.path);
+      {tabs.map((tab) => {
+        const kind = kindOfPath(tab.path);
+        return (
+          <div
+            key={tab.path}
+            className={`tab ${tab.path === activePath ? "active" : ""}`}
+            onClick={() => setActive(tab.path)}
+            onAuxClick={(e) => {
+              if (e.button === 1) closeTab(tab.path);
             }}
+            title={tab.path}
           >
-            ×
-          </button>
-        </div>
-      ))}
-      <button className="new-tab" title="Quick switcher" onClick={() => useStore.getState().setQuickSwitcherOpen(true)}>＋</button>
+            <span className="tab-icon">{kind === "page" ? "◫" : iconOf(kind)}</span>
+            <span className="tab-title">{tab.title}</span>
+            <button
+              className="tab-close"
+              onClick={(e) => {
+                e.stopPropagation();
+                closeTab(tab.path);
+              }}
+            >
+              ×
+            </button>
+          </div>
+        );
+      })}
+      <button
+        className="new-tab"
+        title="Quick search (Ctrl+K)"
+        onClick={() => useStore.getState().setQuickSearchOpen(true)}
+      >
+        ＋
+      </button>
       <div className="tab-spacer" />
-      <button className="tabs-command" title="Command palette (Ctrl+K)" onClick={() => useStore.getState().setCommandPaletteOpen(true)}>⌘</button>
+      <button
+        className="tabs-command"
+        title="Command palette (Ctrl+Shift+P)"
+        onClick={() => useStore.getState().setCommandPaletteOpen(true)}
+      >
+        ⌘
+      </button>
     </div>
   );
 }

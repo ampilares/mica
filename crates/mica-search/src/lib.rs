@@ -40,6 +40,20 @@ pub struct TagCount {
     pub count: i64,
 }
 
+/// One row of the All-docs page (spec §2.1). `has_canvas` is filled in by the
+/// command layer (sidecar existence is a filesystem fact, not an index fact).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocMeta {
+    pub path: VaultPath,
+    pub title: String,
+    pub kind: FileKind,
+    pub created: Option<String>,
+    pub updated: String,
+    pub tags: Vec<String>,
+    pub journal: Option<String>,
+    pub has_canvas: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphNode {
     pub path: VaultPath,
@@ -123,7 +137,10 @@ impl SearchIndex {
                     aliases TEXT NOT NULL DEFAULT '',
                     content_hash TEXT NOT NULL DEFAULT '',
                     mtime INTEGER NOT NULL DEFAULT 0,
-                    size INTEGER NOT NULL DEFAULT 0
+                    size INTEGER NOT NULL DEFAULT 0,
+                    created TEXT NOT NULL DEFAULT '',
+                    updated TEXT NOT NULL DEFAULT '',
+                    journal TEXT
                 );
                 CREATE INDEX files_kind ON files(kind);
                 CREATE INDEX files_note_id ON files(note_id);
@@ -169,6 +186,7 @@ impl SearchIndex {
         let files: Vec<_> = tree
             .files()
             .iter()
+            .filter(|f| !f.path.is_sidecar_canvas())
             .map(|f| (f.path.clone(), f.kind.unwrap_or(FileKind::Other)))
             .collect();
 
@@ -197,6 +215,7 @@ impl SearchIndex {
         let disk: Vec<(VaultPath, FileKind, i64, i64)> = tree
             .files()
             .iter()
+            .filter(|f| !f.path.is_sidecar_canvas())
             .filter_map(|f| {
                 let meta = std::fs::metadata(vault.abs(&f.path)).ok()?;
                 let mtime = meta
@@ -271,6 +290,10 @@ impl SearchIndex {
 
     /// Index or re-index one file after a save or external change.
     pub fn update_file(&mut self, vault: &Vault, path: &VaultPath) -> Result<()> {
+        if path.is_sidecar_canvas() {
+            // Sidecar canvases are never indexed (spec §2.5).
+            return self.remove_file(path);
+        }
         let kind = FileKind::from_path(path);
         let tx = self
             .conn
@@ -299,8 +322,10 @@ impl SearchIndex {
                 .transaction()
                 .map_err(|e| CoreError::Index(e.to_string()))?;
             remove_one(&tx, from)?;
-            let kind = FileKind::from_path(to);
-            index_one(&tx, vault, to, kind)?;
+            if !to.is_sidecar_canvas() {
+                let kind = FileKind::from_path(to);
+                index_one(&tx, vault, to, kind)?;
+            }
             tx.commit().map_err(|e| CoreError::Index(e.to_string()))?;
         }
         self.resolve_links()
@@ -526,6 +551,63 @@ impl SearchIndex {
         Ok(rows)
     }
 
+    /// All docs with the metadata the All-docs page needs, newest first.
+    /// Frontmatter timestamps win; files without them fall back to mtime.
+    pub fn docs_list(&self) -> Result<Vec<DocMeta>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT f.path, f.title, f.kind, f.created, f.updated, f.mtime, f.journal,
+                        (SELECT GROUP_CONCAT(t.tag, '\u{1f}') FROM tags t WHERE t.file_id = f.id)
+                 FROM files f
+                 WHERE f.kind IN ('note','database','canvas')
+                 ORDER BY f.path",
+            )
+            .map_err(|e| CoreError::Index(e.to_string()))?;
+        let mut docs: Vec<DocMeta> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                ))
+            })
+            .map_err(|e| CoreError::Index(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .filter_map(|(path, title, kind, created, updated, mtime, journal, tags)| {
+                let path = VaultPath::new(&path).ok()?;
+                Some(DocMeta {
+                    path,
+                    title,
+                    kind: match kind.as_str() {
+                        "note" => FileKind::Note,
+                        "database" => FileKind::Database,
+                        "canvas" => FileKind::Canvas,
+                        _ => FileKind::Other,
+                    },
+                    created: (!created.is_empty()).then_some(created),
+                    updated: if updated.is_empty() {
+                        mica_core::rfc3339_from_unix(mtime)
+                    } else {
+                        updated
+                    },
+                    tags: tags
+                        .map(|t| t.split('\u{1f}').map(String::from).collect())
+                        .unwrap_or_default(),
+                    journal,
+                    has_canvas: false,
+                })
+            })
+            .collect();
+        docs.sort_by(|a, b| b.updated.cmp(&a.updated).then(a.path.cmp(&b.path)));
+        Ok(docs)
+    }
+
     pub fn tags(&self) -> Result<Vec<TagCount>> {
         let mut stmt = self
             .conn
@@ -721,8 +803,8 @@ fn index_one(
             let title = meta.title.clone().unwrap_or_else(|| path.stem().to_string());
 
             tx.execute(
-                "INSERT INTO files(path, kind, title, note_id, aliases, content_hash, mtime, size)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                "INSERT INTO files(path, kind, title, note_id, aliases, content_hash, mtime, size, created, updated, journal)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 params![
                     path.as_str(),
                     kind_str,
@@ -731,7 +813,10 @@ fn index_one(
                     meta.aliases.join(","),
                     hash.as_str(),
                     mtime,
-                    size
+                    size,
+                    meta.created.clone().unwrap_or_default(),
+                    meta.updated.clone().unwrap_or_default(),
+                    meta.journal
                 ],
             )
             .map_err(|e| CoreError::Index(e.to_string()))?;
@@ -994,6 +1079,54 @@ mod tests {
         assert!(hits.iter().any(|h| h.path.as_str() == "databases/ops.database.json"));
         let hits = index.search("zeppelin", 10).unwrap();
         assert!(hits.iter().any(|h| h.path.as_str() == "canvases/map.drawio"));
+    }
+
+    #[test]
+    fn docs_list_metadata_and_sidecar_exclusion() {
+        let (_dir, vault, mut index) = setup();
+        vault
+            .write_text(
+                &VaultPath::new("notes/plan.md").unwrap(),
+                "---\ntitle: Plan\ncreated: 2026-07-01T10:00:00Z\nupdated: 2026-07-19T09:00:00Z\ntags: [project]\n---\n\n# Plan\n",
+            )
+            .unwrap();
+        vault
+            .write_text(
+                &VaultPath::new("journals/2026-07-20.md").unwrap(),
+                "---\ntitle: Jul 20, 2026\njournal: 2026-07-20\n---\n\n# Jul 20, 2026\n",
+            )
+            .unwrap();
+        // Edgeless sidecar: must not appear as a doc.
+        vault
+            .write_text(
+                &VaultPath::new("notes/plan.canvas.drawio").unwrap(),
+                &mica_drawio::Scene::new("Plan").serialize().unwrap(),
+            )
+            .unwrap();
+        index.rebuild(&vault).unwrap();
+
+        let docs = index.docs_list().unwrap();
+        assert!(docs.iter().all(|d| !d.path.is_sidecar_canvas()));
+        let plan = docs.iter().find(|d| d.path.as_str() == "notes/plan.md").unwrap();
+        assert_eq!(plan.created.as_deref(), Some("2026-07-01T10:00:00Z"));
+        assert_eq!(plan.updated, "2026-07-19T09:00:00Z");
+        assert_eq!(plan.tags, vec!["project"]);
+        assert!(plan.journal.is_none());
+        let journal = docs
+            .iter()
+            .find(|d| d.path.as_str() == "journals/2026-07-20.md")
+            .unwrap();
+        assert_eq!(journal.journal.as_deref(), Some("2026-07-20"));
+        // A note without frontmatter still gets an mtime-based updated stamp.
+        vault
+            .write_text(&VaultPath::new("notes/bare.md").unwrap(), "# Bare\n")
+            .unwrap();
+        index
+            .update_file(&vault, &VaultPath::new("notes/bare.md").unwrap())
+            .unwrap();
+        let docs = index.docs_list().unwrap();
+        let bare = docs.iter().find(|d| d.path.as_str() == "notes/bare.md").unwrap();
+        assert!(bare.updated.starts_with("20"));
     }
 
     #[test]

@@ -87,11 +87,58 @@ check("canvas svg rendered", await evalJs(`!!document.querySelector('.canvas-svg
 check("canvas shows 3 vertices + edge", await evalJs(`document.querySelectorAll('.canvas-svg .cell').length >= 3 && document.querySelectorAll('.canvas-svg .edge').length >= 1`));
 check("note-link cell rendered", await evalJs(`!!document.querySelector('.canvas-svg .cell-note_link')`));
 
-// 6. Quick switcher opens.
-await evalJs(`window.__mica.useStore.getState().setQuickSwitcherOpen(true); 'ok'`);
+// 6. Quick search opens (v2 shell).
+await evalJs(`window.__mica.useStore.getState().setQuickSearchOpen(true); 'ok'`);
 await sleep(400);
-check("quick switcher modal", await evalJs(`!!document.querySelector('.modal.palette input')`));
-await evalJs(`window.__mica.useStore.getState().setQuickSwitcherOpen(false); 'ok'`);
+check("quick search modal", await evalJs(`!!document.querySelector('.modal.quick-search input')`));
+await evalJs(`window.__mica.useStore.getState().setQuickSearchOpen(false); 'ok'`);
+
+// 6b. v2 shell: All-docs page lists the fixture docs.
+await evalJs(`window.__mica.useStore.getState().refreshDocs(); 'ok'`);
+await sleep(600);
+await evalJs(`window.__mica.useStore.getState().openPage('all-docs'); 'ok'`);
+await sleep(500);
+check("all-docs page rendered", await evalJs(`!!document.querySelector('.docs-page')`));
+check(
+  "all-docs lists roadmap",
+  await evalJs(`[...document.querySelectorAll('.docs-row .docs-title')].some(el => el.textContent.toLowerCase().includes('roadmap'))`),
+);
+
+// 6c. v2 shell: journal ensure creates today's doc.
+const journalPath = await evalJs(`(async () => {
+  const iso = new Date().toISOString().slice(0, 10);
+  const file = await window.__mica.api.journalEnsure(iso);
+  return file.path;
+})()`);
+check("journal created", /^journals\/\d{4}-\d{2}-\d{2}\.md$/.test(journalPath ?? ""), journalPath);
+check("journal on disk", fs.existsSync(`${VAULT}/${journalPath}`));
+
+// 6d. v2 shell: trash round-trip through the store-facing API.
+const trashed = await evalJs(`(async () => {
+  const { api } = window.__mica;
+  const file = await api.noteCreate("Trash Me E2E");
+  const moved = await api.trashMove(file.path);
+  const list = await api.trashList();
+  const entry = list.find((e) => e.trash_path === moved[0]);
+  const restored = await api.trashRestore(moved[0]);
+  return { original: file.path, listed: !!entry, restored };
+})()`);
+check("trash listed entry", trashed?.listed === true);
+check("trash restore returns original path", trashed?.restored === trashed?.original, JSON.stringify(trashed));
+
+// 6e. v2 shell: doc header + mode switch present on the note tab.
+await evalJs(`window.__mica.useStore.getState().setActive('notes/roadmap.md'); 'ok'`);
+await sleep(300);
+check("doc header rendered", await evalJs(`[...document.querySelectorAll('.doc-header')].some(el => el.closest('.doc-pane').style.display !== 'none')`));
+check("mode switch rendered", await evalJs(`!!document.querySelector('.mode-switch')`));
+
+// 6f. v2 shell: edgeless mode creates the sidecar canvas.
+await evalJs(`(async () => { await window.__mica.useStore.getState().setDocMode('notes/roadmap.md', 'edgeless'); return 'ok'; })()`);
+await sleep(900);
+check("sidecar canvas on disk", fs.existsSync(`${VAULT}/notes/roadmap.canvas.drawio`));
+check("edgeless canvas rendered for note", await evalJs(`[...document.querySelectorAll('.doc-pane')].some(p => p.style.display !== 'none' && p.querySelector('.canvas-svg'))`));
+await evalJs(`(async () => { await window.__mica.useStore.getState().setDocMode('notes/roadmap.md', 'page'); return 'ok'; })()`);
+await sleep(400);
 
 // 7. Screenshot the canvas view for the record.
 await evalJs(`window.__mica.useStore.getState().setActive('canvases/e2e-map.drawio'); 'ok'`);
