@@ -16,6 +16,10 @@ own (the **vault**):
 | Whiteboard | Uncompressed draw.io-compatible XML | `.drawio` |
 | Trash | Files moved (not copied) under | `.trash/` |
 
+The core app is free and complete offline. Paid **Mica Pro** services (sync,
+collaboration, publishing, AI) are planned as additive services on the same
+plain files — never proprietary formats. See [docs/v2.1/PRD.md](docs/v2.1/PRD.md).
+
 Everything else (search index, thumbnails, view state) is a rebuildable cache
 under `.workspace/` and never the source of truth. See [docs/PRD.md](docs/PRD.md),
 [docs/specifications.md](docs/specifications.md), and
