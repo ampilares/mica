@@ -18,6 +18,8 @@ mica-drawio = { workspace = true }
 mica-search = { workspace = true }
 mica-watch = { workspace = true }
 walkdir = { workspace = true }
+ureq = { workspace = true }
+regex = { workspace = true }
 
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"

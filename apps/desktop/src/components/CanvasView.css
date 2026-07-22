@@ -210,3 +210,115 @@
   margin-left: 4px;
   color: var(--danger);
 }
+
+/* --- FR21-EDG-002: group container --- */
+.cell-group rect {
+  fill: transparent;
+  stroke: var(--border-strong);
+  stroke-dasharray: 2 4;
+}
+.cell-group.selected rect {
+  stroke: var(--accent);
+  stroke-dasharray: none;
+}
+
+/* --- FR21-EDG-003: pen strokes --- */
+.canvas-svg.tool-pen {
+  cursor: crosshair;
+}
+.pen-live {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+.cell-pen .cell-pen-line {
+  pointer-events: stroke;
+}
+.cell-pen .pen-bounds {
+  fill: none;
+  stroke: var(--accent);
+  stroke-dasharray: 4 3;
+  pointer-events: none;
+}
+
+/* --- FR21-EDG-001: selection style panel, top-right --- */
+.edgeless-style {
+  top: 14px;
+  right: 14px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px;
+  width: max-content;
+  max-width: 260px;
+}
+.edgeless-style-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.edgeless-style-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  min-width: 34px;
+}
+.edgeless-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.edgeless-style .swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  padding: 0;
+  cursor: pointer;
+}
+.edgeless-style .swatch:hover {
+  transform: scale(1.12);
+}
+.edgeless-style .swatch.active {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.edgeless-style .swatch-none {
+  position: relative;
+  background: var(--bg-panel);
+}
+.edgeless-style .swatch-none::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border-top: 1.5px solid var(--danger);
+  transform: rotate(45deg);
+  transform-origin: center;
+}
+.edgeless-style .edgeless-seg {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.edgeless-style .edgeless-seg button {
+  min-width: 26px;
+  height: 24px;
+  padding: 0 6px;
+  border-radius: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-right: 1px solid var(--border);
+}
+.edgeless-style .edgeless-seg button:last-child {
+  border-right: none;
+}
+.edgeless-style .edgeless-seg button:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.edgeless-style .edgeless-seg button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}

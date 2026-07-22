@@ -1,6 +1,14 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { useStore, kindOfPath, titleOfPath, sidecarOf, journalDateOf } from "./store";
+import {
+  useStore,
+  kindOfPath,
+  titleOfPath,
+  sidecarOf,
+  journalDateOf,
+  Pane as StorePane,
+} from "./store";
 import { api, VaultEvent } from "./api";
 import Onboarding from "./components/Onboarding";
 import Sidebar from "./components/Sidebar";
@@ -22,14 +30,19 @@ import RightSidebar from "./components/RightSidebar";
 import DataExplainer from "./components/DataExplainer";
 import SettingsDialog from "./components/SettingsDialog";
 import GraphPanel from "./components/GraphPanel";
+import PeekModal from "./components/PeekModal";
+import { TAB_DND_MIME } from "./components/Tabs";
 import { docEvents } from "./docEvents";
 import { useSettings, applySettings } from "./settings";
 import { useWorkspaceMeta } from "./workspaceMeta";
+import "./components/SplitLayout.css";
 
 export default function App() {
   const vault = useStore((s) => s.vault);
-  const tabs = useStore((s) => s.tabs);
-  const activePath = useStore((s) => s.activePath);
+  const panes = useStore((s) => s.panes);
+  const activePane = useStore((s) => s.activePane);
+  const splitRatio = useStore((s) => s.splitRatio);
+  const peekPath = useStore((s) => s.peekPath);
   const refreshTree = useStore((s) => s.refreshTree);
   const refreshDocs = useStore((s) => s.refreshDocs);
   const sidebarCollapsed = useStore((s) => s.sidebarCollapsed);
@@ -87,6 +100,18 @@ export default function App() {
           e.preventDefault();
           s.toggleSourceMode(s.activePath);
         }
+      } else if (mod && e.key === "\\") {
+        // Toggle split of the current document: split it into a second pane,
+        // or collapse back to a single pane if already split.
+        e.preventDefault();
+        if (s.panes.length > 1) {
+          s.unsplit();
+        } else if (s.activePath) {
+          s.splitWith(s.activePath);
+        }
+      } else if (e.key === "Escape" && s.peekPath) {
+        e.preventDefault();
+        s.setPeek(null);
       } else if (e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
         // Journal prev/next day on journal docs.
         const date = s.activePath ? journalDateOf(s.activePath) : null;
@@ -107,6 +132,25 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Global peek affordance (spec §3.3): Shift+click any element carrying a
+  // `data-peek-path` opens a read-only preview. Capture phase so it wins
+  // before the element's own click handler (e.g. a tab's setActive).
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      if (!e.shiftKey || e.button !== 0) return;
+      const target = e.target as HTMLElement | null;
+      const el = target?.closest?.("[data-peek-path]") as HTMLElement | null;
+      const path = el?.getAttribute("data-peek-path");
+      if (path) {
+        e.preventDefault();
+        e.stopPropagation();
+        useStore.getState().setPeek(path);
+      }
+    };
+    document.addEventListener("click", onClick, true);
+    return () => document.removeEventListener("click", onClick, true);
   }, []);
 
   // Vault file events from the Rust watcher.
@@ -132,19 +176,36 @@ export default function App() {
     return <Onboarding />;
   }
 
+  const split = panes.length > 1;
+
   return (
     <div className={`app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <Sidebar />
       <div className="main">
-        <Tabs />
-        <div className="content">
-          {tabs.map((tab) => (
-            <Pane key={tab.path} path={tab.path} active={tab.path === activePath} />
-          ))}
-          {tabs.length === 0 && <EmptyState />}
-        </div>
+        {split ? (
+          <div className="panes-split">
+            <PaneColumn index={0} pane={panes[0]} active={activePane === 0} flex={splitRatio} />
+            <Divider />
+            <PaneColumn index={1} pane={panes[1]} active={activePane === 1} flex={1 - splitRatio} />
+          </div>
+        ) : (
+          <>
+            <Tabs paneIndex={0} />
+            <div className="content">
+              {panes[0].tabs.map((tab) => (
+                <DocContent
+                  key={tab.path}
+                  path={tab.path}
+                  active={tab.path === panes[0].activePath}
+                />
+              ))}
+              {panes[0].tabs.length === 0 && <EmptyState />}
+            </div>
+          </>
+        )}
       </div>
       <RightSidebar />
+      {peekPath && <PeekModal key={peekPath} path={peekPath} />}
       <QuickSearch />
       <CommandPalette />
       <ConflictDialog />
@@ -171,7 +232,99 @@ export default function App() {
   );
 }
 
-function Pane({ path, active }: { path: string; active: boolean }) {
+/** One split pane: its own tab strip + content column. */
+function PaneColumn({
+  index,
+  pane,
+  active,
+  flex,
+}: {
+  index: 0 | 1;
+  pane: StorePane;
+  active: boolean;
+  flex: number;
+}) {
+  const setActivePane = useStore((s) => s.setActivePane);
+  const moveTabToPane = useStore((s) => s.moveTabToPane);
+  const [dragOver, setDragOver] = useState(false);
+
+  return (
+    <div
+      className={`pane-column ${active ? "active" : "inactive"}`}
+      style={{ flexGrow: flex, flexBasis: 0, minWidth: 0 }}
+      onMouseDownCapture={() => setActivePane(index)}
+    >
+      <Tabs paneIndex={index} />
+      <div
+        className={`content ${dragOver ? "drop-target" : ""}`}
+        onDragOver={(e) => {
+          if (e.dataTransfer.types.includes(TAB_DND_MIME)) {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            if (!dragOver) setDragOver(true);
+          }
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
+        }}
+        onDrop={(e) => {
+          const path = e.dataTransfer.getData(TAB_DND_MIME);
+          setDragOver(false);
+          if (path) {
+            e.preventDefault();
+            moveTabToPane(path, index);
+          }
+        }}
+      >
+        {pane.tabs.map((tab) => (
+          <DocContent
+            key={tab.path}
+            path={tab.path}
+            active={tab.path === pane.activePath}
+          />
+        ))}
+        {pane.tabs.length === 0 && <EmptyState />}
+      </div>
+    </div>
+  );
+}
+
+/** Draggable vertical divider between the two panes (25%–75%). */
+function Divider() {
+  const setSplitRatio = useStore((s) => s.setSplitRatio);
+  const dragging = useRef(false);
+
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    dragging.current = true;
+    const container = (e.currentTarget.parentElement as HTMLElement) ?? null;
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging.current || !container) return;
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      setSplitRatio((ev.clientX - rect.left) / rect.width);
+    };
+    const onUp = () => {
+      dragging.current = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  return (
+    <div
+      className="pane-divider"
+      role="separator"
+      aria-orientation="vertical"
+      title="Drag to resize"
+      onPointerDown={onPointerDown}
+    />
+  );
+}
+
+function DocContent({ path, active }: { path: string; active: boolean }) {
   const sourceMode = useStore((s) => s.sourceMode[path]);
   const edgeless = useStore((s) => s.docMode[path] === "edgeless");
   const kind = kindOfPath(path);

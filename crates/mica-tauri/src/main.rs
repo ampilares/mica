@@ -53,6 +53,8 @@ fn main() {
             commands::docs_list,
             commands::journal_ensure,
             commands::asset_stat,
+            commands::link_preview,
+            commands::open_url,
             commands::note_section,
             commands::template_list,
             commands::template_instantiate,

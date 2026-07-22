@@ -158,5 +158,24 @@ decrypts nothing without client key).
   - Verified live: backend 45/45, UI 27/27, blocks 15/15, wave-1 probe 9/9
     (template substitution, snapshot/restore round-trip incl. pre-restore
     snapshot, panel rendering). cargo test, tsc, build all green.
-- Next: C2 (attachments/link cards/embeds), C3 (wiki embeds + hover
-  previews), C4 (split/peek), C6 (edgeless depth), C8–C9, P-track.
+- 2026-07-22 — Wave 2 complete (C2 + C3 + C4 + C6):
+  - C2/C3: attachment cards, opt-in link cards + YouTube embeds (link_preview
+    command with ureq, cache, "previews_disabled" quiet fallback; open_url
+    command for external links), `![[Note]]`/`![[Note#Heading]]` wiki embeds
+    (depth-1, docEvents refresh, unresolved chips), wiki-link hover previews.
+    embeds e2e 17/17, all byte-exact round-trips.
+  - C4: split view (panes as source of truth, mirrored tabs/activePath keep
+    the whole existing API and e2e harness working unmodified; Ctrl+\\
+    toggles, drag-tab-to-pane, persisted ratio) + PeekModal (read-only
+    preview, data-peek-path shift+click affordance).
+  - C6: mica-drawio pen strokes, native draw.io group/ungroup with relative
+    member geometry, mindmap ops with tidy-tree layout and
+    data-workspace-type passthrough (8 crate tests); CanvasView style panel
+    (fill/stroke/width/font via style-string merge), pen tool, mindmap
+    Tab/Enter growth, group move as single-op updates.
+  - Verified live: backend 45/45, UI 27/27 (unmodified against the pane
+    store), blocks 15/15, embeds 17/17, wave-2 probe (split/peek/pen/
+    mindmap/style panel + group round-trip). cargo test 15 suites, tsc,
+    build green.
+- Next: C8 (calendar feeds, optional), C9 (parity audit + release), P-track
+  (entitlements, sync alpha).

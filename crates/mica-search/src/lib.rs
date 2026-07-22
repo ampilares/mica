@@ -1063,6 +1063,8 @@ mod tests {
                     style: None,
                     href: None,
                     view: None,
+                    ws_type: None,
+                    ws_parent: None,
                 },
             }],
         )

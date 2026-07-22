@@ -1,0 +1,88 @@
+/* Peek view modal (spec §3.3): read-only centered preview. */
+
+.peek-modal {
+  width: 70vw;
+  max-width: 1000px;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.peek-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 16px 13px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.peek-title {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.peek-badge {
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 7px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.peek-x {
+  margin-left: auto;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.peek-x:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.peek-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+.peek-scroll {
+  padding: 16px 32px 40px;
+}
+/* Read-only: hide the text caret and selection affordances. */
+.peek-content {
+  caret-color: transparent;
+}
+
+.peek-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 4px;
+  color: var(--text-muted);
+}
+.peek-loading {
+  position: absolute;
+  top: 16px;
+  right: 20px;
+}
+
+.peek-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}

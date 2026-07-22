@@ -216,6 +216,8 @@ export type CellKind =
   | "frame"
   | "note_link"
   | "database_link"
+  | "pen"
+  | "group"
   | "unknown";
 
 export interface Geometry {
@@ -236,6 +238,8 @@ export interface SceneCell {
   style?: string;
   href?: string;
   view?: string;
+  ws_type?: string;
+  ws_parent?: string;
 }
 
 export interface Scene {
@@ -249,7 +253,12 @@ export type CanvasOp =
   | { op: "update_cell"; cell: SceneCell }
   | { op: "remove_cell"; id: string }
   | { op: "rename_scene"; name: string }
-  | { op: "reorder_cell"; id: string; to_index: number };
+  | { op: "reorder_cell"; id: string; to_index: number }
+  | { op: "group_cells"; ids: string[] }
+  | { op: "ungroup_cells"; id: string }
+  | { op: "add_stroke"; cell: SceneCell }
+  | { op: "mindmap_add_child"; parent_id: string; label: string }
+  | { op: "mindmap_add_sibling"; sibling_id: string; label: string };
 
 // ---- commands ----
 
@@ -340,6 +349,11 @@ export const api = {
     invoke<LoadedFile>("canvas_sidecar_ensure", { path }),
   assetStat: (path: string) =>
     invoke<{ size: number; mtime: string }>("asset_stat", { path }),
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
+  linkPreview: (url: string) =>
+    invoke<{ title: string; description: string; favicon: string }>("link_preview", {
+      url,
+    }),
   noteSection: (path: string, heading?: string) =>
     invoke<string>("note_section", { path, heading }),
   templateList: () =>

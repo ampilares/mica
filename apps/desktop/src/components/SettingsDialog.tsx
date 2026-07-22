@@ -289,6 +289,18 @@ export default function SettingsDialog() {
                         <option value="title">Title as typed</option>
                       </select>
                     </label>
+                    {/* FR21-BLK-006: per-vault opt-in for network link previews. */}
+                    <label className="sd-row">
+                      <span className="sd-row-label">
+                        <strong>Fetch link previews</strong>
+                        <small>Fetches titles for link cards from the web. Off by default.</small>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={config.link_previews === true}
+                        onChange={(e) => void patchConfig({ link_previews: e.target.checked })}
+                      />
+                    </label>
                     {saveError && <div className="sd-error">{saveError}</div>}
                   </>
                 ) : (

@@ -1111,6 +1111,8 @@ pub fn canvas_sidecar_ensure(state: State<'_, AppState>, path: String) -> ApiRes
         style: None,
         href: Some(md.file_name().to_string()),
         view: None,
+        ws_type: None,
+        ws_parent: None,
     });
     let content = scene.serialize().map_err(ApiError::from)?;
     let version = guarded_write(&open, &sidecar, &content, None)?;
@@ -1235,6 +1237,147 @@ pub fn note_section(
         message: format!("heading not found: {}", heading.unwrap_or_default()),
         path: Some(path),
     })
+}
+
+// ----------------------------------------------------------- link cards ----
+
+/// Open an external http(s) URL in the system browser (NFR-SEC-004: links
+/// open with explicit user intent — this is only called from clicks).
+#[tauri::command]
+pub fn open_url(url: String) -> ApiResult<()> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(ApiError {
+            code: "bad_url".into(),
+            message: "only http(s) URLs can be opened".into(),
+            path: None,
+        });
+    }
+    tauri_plugin_opener::open_url(&url, None::<String>).map_err(|e| ApiError {
+        code: "open_failed".into(),
+        message: e.to_string(),
+        path: None,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct LinkPreview {
+    pub title: String,
+    pub description: String,
+    /// Site favicon URL (not fetched; the webview loads it directly).
+    pub favicon: String,
+}
+
+/// Fetch title/description for a link card (FR21-BLK-006). Gated by the
+/// per-vault `link_previews: true` opt-in (spec §1.6) — the free app makes
+/// no network calls without it. Results cache in `.workspace/linkmeta.json`.
+#[tauri::command]
+pub fn link_preview(state: State<'_, AppState>, url: String) -> ApiResult<LinkPreview> {
+    let open = state.current().map_err(ApiError::from)?;
+    let enabled = open
+        .vault
+        .config()
+        .extra
+        .get("link_previews")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !enabled {
+        return Err(ApiError {
+            code: "previews_disabled".into(),
+            message: "Link previews are disabled for this vault (Settings → Workspace).".into(),
+            path: None,
+        });
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(ApiError {
+            code: "bad_url".into(),
+            message: "only http(s) URLs can be previewed".into(),
+            path: None,
+        });
+    }
+
+    // Cache first (rebuildable, cache-class — spec §4).
+    let cache_path = open
+        .vault
+        .root()
+        .join(WORKSPACE_DIR)
+        .join("linkmeta.json");
+    let mut cache: BTreeMap<String, LinkPreview> = std::fs::read_to_string(&cache_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    if let Some(hit) = cache.get(&url) {
+        return Ok(hit.clone());
+    }
+
+    let body = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(6))
+        .set("user-agent", "Mica/2.1 (+link-preview)")
+        .call()
+        .map_err(|e| ApiError {
+            code: "fetch_failed".into(),
+            message: e.to_string(),
+            path: None,
+        })?
+        .into_reader();
+    // Cap at 512 KiB — enough for <head> metadata on any sane page.
+    use std::io::Read as _;
+    let mut buf = Vec::with_capacity(64 * 1024);
+    let _ = body.take(512 * 1024).read_to_end(&mut buf);
+    let html = String::from_utf8_lossy(&buf);
+
+    let pick = |re: &str| -> String {
+        regex::Regex::new(re)
+            .ok()
+            .and_then(|r| r.captures(&html))
+            .and_then(|c| c.get(1))
+            .map(|m| html_unescape(m.as_str().trim()))
+            .unwrap_or_default()
+    };
+    let title = {
+        let og = pick(r#"(?is)<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']"#);
+        if og.is_empty() {
+            pick(r"(?is)<title[^>]*>([^<]+)</title>")
+        } else {
+            og
+        }
+    };
+    let description = {
+        let og =
+            pick(r#"(?is)<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']"#);
+        if og.is_empty() {
+            pick(r#"(?is)<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']"#)
+        } else {
+            og
+        }
+    };
+    // Favicon: site-root default; the webview falls back gracefully on 404.
+    let favicon = url
+        .split('/')
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("/")
+        + "/favicon.ico";
+
+    let preview = LinkPreview {
+        title: if title.is_empty() { url.clone() } else { title },
+        description,
+        favicon,
+    };
+    cache.insert(url, preview.clone());
+    if let Ok(mut bytes) = serde_json::to_vec_pretty(&cache) {
+        bytes.push(b'\n');
+        let _ = mica_vault::atomic_write(&cache_path, &bytes);
+    }
+    Ok(preview)
+}
+
+fn html_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
 }
 
 // ------------------------------------------------------------- templates ----

@@ -22,7 +22,12 @@ import { Callout } from "../editor/callout";
 import { Toggle } from "../editor/toggle";
 import { tableExtensions } from "../editor/tableBlock";
 import { MathInline, MathBlock } from "../editor/math";
+import { AttachmentCard } from "../editor/attachmentCard";
+import { LinkCard, BareUrlAffordance } from "../editor/linkCard";
+import { WikiEmbed } from "../editor/wikiEmbed";
+import { HoverPreview } from "../editor/hoverPreview";
 import "../editor/blocks.css";
+import "../editor/embeds.css";
 import { useSettings } from "../settings";
 
 /**
@@ -108,6 +113,44 @@ const SLASH_ITEMS: SlashItem[] = [
     run: (e, r) =>
       e.chain().focus().deleteRange(r).insertContent({ type: "mathInline", attrs: { latex: "" } }).run(),
   },
+  // FR21-BLK-006..008: link cards, embeds, wiki embeds.
+  {
+    key: "bookmark",
+    label: "Bookmark",
+    hint: "link preview card",
+    run: (e, r) => {
+      const url = prompt("Link URL", "https://");
+      if (!url) return e.chain().focus().deleteRange(r).run();
+      e.chain().focus().deleteRange(r)
+        .insertContent({ type: "linkCard", attrs: { title: url, url, mode: "card" } })
+        .run();
+    },
+  },
+  {
+    key: "youtube",
+    label: "YouTube / Embed",
+    hint: "paste a video URL",
+    run: (e, r) => {
+      const url = prompt("Embed URL (YouTube supported)", "https://");
+      if (!url) return e.chain().focus().deleteRange(r).run();
+      e.chain().focus().deleteRange(r)
+        .insertContent({ type: "linkCard", attrs: { title: url, url, mode: "embed" } })
+        .run();
+    },
+  },
+  {
+    key: "embed-doc",
+    label: "Embed doc",
+    hint: "![[Note#Heading]]",
+    run: (e, r) => {
+      const raw = prompt("Note to embed (optionally Note#Heading)", "");
+      if (!raw) return e.chain().focus().deleteRange(r).run();
+      const [target, heading = ""] = raw.split("#");
+      e.chain().focus().deleteRange(r)
+        .insertContent({ type: "wikiEmbed", attrs: { target: target.trim(), heading: heading.trim() } })
+        .run();
+    },
+  },
   { key: "database", label: "Database", hint: "table + kanban", run: () => {} }, // handled specially
 ];
 
@@ -132,6 +175,18 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
   popupRef.current = popup;
   const pathRef = useRef(path);
   pathRef.current = path;
+  // Whether this vault opted into link previews (FR21-BLK-006). Read once on
+  // mount; only gates the bare-URL affordance — the card node self-gates via
+  // api.linkPreview.
+  const previewsRef = useRef(false);
+  useEffect(() => {
+    api
+      .configGet()
+      .then((c) => {
+        previewsRef.current = c.link_previews === true;
+      })
+      .catch(() => {});
+  }, []);
 
   const editor = useEditor({
     extensions: [
@@ -143,6 +198,12 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
       ...tableExtensions,
       MathInline,
       MathBlock,
+      // FR21-BLK-005..008 block types (byte-exact Markdown round-trip).
+      AttachmentCard(path),
+      LinkCard,
+      WikiEmbed,
+      BareUrlAffordance(() => previewsRef.current),
+      HoverPreview,
       TaskList,
       TaskItem.configure({ nested: true }),
       Link.configure({ openOnClick: false }),
@@ -251,25 +312,23 @@ export default function NoteEditor({ path, active }: { path: string; active: boo
       handlePaste: (view, event) => {
         const files = event.clipboardData?.files;
         if (files && files.length > 0) {
-          const image = Array.from(files).find((f) => f.type.startsWith("image/"));
-          if (image) {
-            event.preventDefault();
-            void (async () => {
-              const buf = await image.arrayBuffer();
-              let binary = "";
-              const bytes = new Uint8Array(buf);
-              for (let i = 0; i < bytes.length; i += 0x8000) {
-                binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-              }
-              const name = image.name || `pasted-${Date.now()}.png`;
-              const assetPath = await api.assetSave(name, btoa(binary));
-              const rel = relativeTo(pathRef.current, assetPath);
-              const { schema } = view.state;
-              const node = schema.nodes.image.create({ src: rel, alt: name });
-              view.dispatch(view.state.tr.replaceSelectionWith(node));
-            })();
-            return true;
-          }
+          // Images become image nodes; any other file becomes an attachment
+          // card (FR21-BLK-005). Both save through the existing asset pipeline.
+          const file = Array.from(files)[0];
+          event.preventDefault();
+          void saveFileNode(view, pathRef.current, file, null);
+          return true;
+        }
+        return false;
+      },
+      handleDrop: (view, event) => {
+        const files = event.dataTransfer?.files;
+        if (files && files.length > 0) {
+          event.preventDefault();
+          const at =
+            view.posAtCoords({ left: event.clientX, top: event.clientY })?.pos ?? null;
+          void saveFileNode(view, pathRef.current, Array.from(files)[0], at);
+          return true;
         }
         return false;
       },
@@ -556,6 +615,39 @@ function suggestionRenderer<T extends PopupItem>(
       setPopup(null);
     },
   };
+}
+
+/**
+ * Save a pasted/dropped file through the asset pipeline and insert a node for
+ * it: an image node for images, otherwise an attachment card (FR21-BLK-005).
+ * `at` is an explicit insert position (drop point) or null to use the selection.
+ */
+async function saveFileNode(
+  view: import("@tiptap/pm/view").EditorView,
+  notePath: string,
+  file: File,
+  at: number | null,
+) {
+  try {
+    const buf = await file.arrayBuffer();
+    let binary = "";
+    const bytes = new Uint8Array(buf);
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    const name = file.name || `file-${Date.now()}`;
+    const assetPath = await api.assetSave(name, btoa(binary));
+    const rel = relativeTo(notePath, assetPath);
+    const { schema } = view.state;
+    const node = file.type.startsWith("image/")
+      ? schema.nodes.image.create({ src: rel, alt: name })
+      : schema.nodes.attachmentCard.create({ href: rel, text: name });
+    const tr =
+      at != null ? view.state.tr.insert(at, node) : view.state.tr.replaceSelectionWith(node);
+    view.dispatch(tr);
+  } catch (e) {
+    console.error("file insert failed", e);
+  }
 }
 
 async function openWikiTarget(
