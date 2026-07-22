@@ -4,6 +4,7 @@ import { api, CanvasOp, CellKind, Scene, SceneCell, isApiError } from "../api";
 import { docEvents } from "../docEvents";
 import { useStore, kindOfPath, titleOfPath } from "../store";
 import { relativeTo } from "../editor/paths";
+import "./CanvasView.css";
 
 type Tool =
   | "select"
@@ -40,38 +41,13 @@ interface Marquee {
   y2: number;
 }
 
-/** Frame list for quick navigation (FR-CAN-008). */
-function FramesMenu({
-  frames,
-  onJump,
-}: {
-  frames: SceneCell[];
-  onJump: (g: { x: number; y: number; width: number; height: number }) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  if (frames.length === 0) return null;
-  return (
-    <span className="menu-anchor">
-      <button className="small" onClick={() => setOpen(!open)}>
-        Frames ({frames.length}) ▾
-      </button>
-      {open && (
-        <div className="dropdown" onMouseLeave={() => setOpen(false)}>
-          {frames.map((f, i) => (
-            <button
-              key={f.id}
-              onClick={() => {
-                setOpen(false);
-                onJump(f.geometry!);
-              }}
-            >
-              {f.label || `Frame ${i + 1}`}
-            </button>
-          ))}
-        </div>
-      )}
-    </span>
-  );
+/** Frames in stable presentation order (FR2-EDG-002): top-to-bottom, then
+ * left-to-right by frame geometry; ties fall back to scene order (stable
+ * sort). Used by both the frames panel and presentation stepping. */
+function frameOrder(cells: SceneCell[]): SceneCell[] {
+  return cells
+    .filter((c) => c.kind === "frame" && c.geometry)
+    .sort((a, b) => a.geometry!.y - b.geometry!.y || a.geometry!.x - b.geometry!.x);
 }
 
 function ExportMenu({
@@ -111,6 +87,9 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   const [viewBox, setViewBox] = useState({ x: -100, y: -100, zoom: 1 });
   const [editingLabel, setEditingLabel] = useState<string | null>(null);
   const [marquee, setMarquee] = useState<Marquee | null>(null);
+  const [framesPanelOpen, setFramesPanelOpen] = useState(false);
+  // Presentation step index (FR2-EDG-002 P1); null = not presenting.
+  const [presentIndex, setPresentIndex] = useState<number | null>(null);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const pathRef = useRef(path);
@@ -457,6 +436,19 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     });
   };
 
+  /** Zoom by a factor about the canvas center, reusing the same viewBox
+   * transform as wheel-zoom (FR2-EDG-001 zoom cluster). */
+  const zoomBy = (factor: number) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    setViewBox((v) => {
+      const zoom = Math.min(4, Math.max(0.1, v.zoom * factor));
+      const cx = rect.width / 2 / v.zoom + v.x;
+      const cy = rect.height / 2 / v.zoom + v.y;
+      return { zoom, x: cx - rect.width / 2 / zoom, y: cy - rect.height / 2 / zoom };
+    });
+  };
+
   /** Standalone SVG of the current scene: DOM clone + inlined styles. */
   const buildExportSvg = (): string | null => {
     const src = svgRef.current;
@@ -647,6 +639,31 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, editingLabel, deleteSelected, duplicateSelected]);
 
+  // Presentation mode (FR2-EDG-002 P1): fit the current frame on every step
+  // change and, while active, own Arrow/Escape via a scoped listener that is
+  // removed on exit.
+  useEffect(() => {
+    if (presentIndex === null) return;
+    const frames = frameOrder(sceneRef.current?.cells ?? []);
+    const f = frames[presentIndex];
+    if (f?.geometry) zoomToRect(f.geometry);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowRight" || e.key === " ") {
+        e.preventDefault();
+        setPresentIndex((i) => Math.min((i ?? 0) + 1, frames.length - 1));
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setPresentIndex((i) => Math.max((i ?? 0) - 1, 0));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setPresentIndex(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presentIndex]);
+
   // Drop a note/database dragged from the sidebar → link cell.
   const onDrop = (e: React.DragEvent) => {
     const dropped = e.dataTransfer.getData("application/x-mica-path");
@@ -672,51 +689,24 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   const vertices = scene.cells.filter((c) => c.kind !== "connector");
   const edges = scene.cells.filter((c) => c.kind === "connector");
   const selectionCount = selected.size;
+  const frames = frameOrder(scene.cells);
+  const presenting = presentIndex !== null;
 
-  const TOOLS: { id: Tool; label: string }[] = [
-    { id: "select", label: "Select" },
-    { id: "hand", label: "Hand" },
-    { id: "rectangle", label: "Rect" },
-    { id: "ellipse", label: "Ellipse" },
-    { id: "diamond", label: "Diamond" },
-    { id: "text", label: "Text" },
-    { id: "sticky", label: "Sticky" },
-    { id: "connector", label: "Connect" },
-    { id: "frame", label: "Frame" },
+  // Compact glyph + title tooltip; behavior/shortcuts unchanged (FR2-EDG-001).
+  const TOOLS: { id: Tool; glyph: string; label: string }[] = [
+    { id: "select", glyph: "↖", label: "Select" },
+    { id: "hand", glyph: "✋", label: "Hand (pan)" },
+    { id: "rectangle", glyph: "▭", label: "Rectangle" },
+    { id: "ellipse", glyph: "◯", label: "Ellipse" },
+    { id: "diamond", glyph: "◇", label: "Diamond" },
+    { id: "text", glyph: "T", label: "Text" },
+    { id: "sticky", glyph: "🗒", label: "Sticky note" },
+    { id: "connector", glyph: "⇢", label: "Connector" },
+    { id: "frame", glyph: "⛶", label: "Frame" },
   ];
 
   return (
-    <div className="canvas-view">
-      <div className="canvas-toolbar">
-        {TOOLS.map((t) => (
-          <button
-            key={t.id}
-            className={tool === t.id ? "active" : ""}
-            onClick={() => {
-              setTool(t.id);
-              setConnectFrom(null);
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-        <div className="spacer" />
-        <FramesMenu
-          frames={scene.cells.filter((c) => c.kind === "frame" && c.geometry)}
-          onJump={(g) => zoomToRect(g)}
-        />
-        <ExportMenu onExport={(f) => void exportCanvas(f)} />
-        <button onClick={zoomToFit} title="Zoom to fit (Ctrl+1)">
-          Fit
-        </button>
-        <button
-          onClick={() => setViewBox({ x: -100, y: -100, zoom: 1 })}
-          title="Reset zoom (Ctrl+0)"
-        >
-          100%
-        </button>
-        <span className="muted small">{Math.round(viewBox.zoom * 100)}%</span>
-      </div>
+    <div className="canvas-view canvas-edgeless">
       {error && <div className="banner warning">{error}</div>}
       {connectFrom && <div className="banner info">Click a second shape to connect.</div>}
       <svg
@@ -787,7 +777,127 @@ export default function CanvasView({ path, active }: { path: string; active: boo
           )}
         </g>
       </svg>
-      {selectionCount > 0 && (
+
+      {/* FR2-EDG-001: zoom cluster, bottom left. */}
+      {!presenting && (
+        <div className="edgeless-float edgeless-zoom">
+          <button onClick={() => zoomBy(1 / 1.2)} title="Zoom out">
+            −
+          </button>
+          <button
+            className="edgeless-pct"
+            onClick={() => setViewBox({ x: -100, y: -100, zoom: 1 })}
+            title="Reset zoom (Ctrl+0)"
+          >
+            {Math.round(viewBox.zoom * 100)}%
+          </button>
+          <button onClick={() => zoomBy(1.2)} title="Zoom in">
+            +
+          </button>
+          <button onClick={zoomToFit} title="Zoom to fit (Ctrl+1)">
+            ⤢
+          </button>
+        </div>
+      )}
+
+      {/* FR2-EDG-001: centered pill tool toolbar, bottom center. */}
+      {!presenting && (
+        <div className="edgeless-float edgeless-tools">
+          {TOOLS.map((t) => (
+            <button
+              key={t.id}
+              className={tool === t.id ? "active" : ""}
+              title={t.label}
+              aria-label={t.label}
+              onClick={() => {
+                setTool(t.id);
+                setConnectFrom(null);
+              }}
+            >
+              {t.glyph}
+            </button>
+          ))}
+          <span className="edgeless-sep" />
+          <button
+            className={framesPanelOpen ? "active" : ""}
+            title="Frames panel"
+            aria-label="Frames panel"
+            onClick={() => setFramesPanelOpen((v) => !v)}
+          >
+            ⊞
+          </button>
+          <button
+            title={frames.length ? "Present frames" : "Add a frame to present"}
+            aria-label="Present"
+            disabled={frames.length === 0}
+            onClick={() => frames.length && setPresentIndex(0)}
+          >
+            ▷
+          </button>
+          <ExportMenu onExport={(f) => void exportCanvas(f)} />
+        </div>
+      )}
+
+      {/* FR2-EDG-002: frames panel overlay, right side. */}
+      {!presenting && framesPanelOpen && (
+        <div className="edgeless-float edgeless-frames">
+          <div className="edgeless-frames-head">
+            <span>Frames ({frames.length})</span>
+            <button className="icon-button" title="Close" onClick={() => setFramesPanelOpen(false)}>
+              ✕
+            </button>
+          </div>
+          <div className="edgeless-frames-list">
+            {frames.length === 0 ? (
+              <div className="edgeless-empty">No frames yet. Use the Frame tool to add one.</div>
+            ) : (
+              frames.map((f, i) => (
+                <button key={f.id} onClick={() => zoomToRect(f.geometry!)}>
+                  <span className="edgeless-frame-idx">{i + 1}</span>
+                  <span>{f.label || `Frame ${i + 1}`}</span>
+                </button>
+              ))
+            )}
+          </div>
+          <div className="edgeless-frames-foot">
+            <button disabled={frames.length === 0} onClick={() => setPresentIndex(0)}>
+              ▷ Present
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* FR2-EDG-002 P1: presentation controls (Arrow/Esc handled in effect). */}
+      {presenting && (
+        <div className="edgeless-present">
+          <button
+            title="Previous (←)"
+            disabled={presentIndex === 0}
+            onClick={() => setPresentIndex((i) => Math.max((i ?? 0) - 1, 0))}
+          >
+            ‹
+          </button>
+          <span className="edgeless-present-count">
+            {(presentIndex ?? 0) + 1} / {frames.length}
+          </span>
+          <button
+            title="Next (→)"
+            disabled={presentIndex === frames.length - 1}
+            onClick={() => setPresentIndex((i) => Math.min((i ?? 0) + 1, frames.length - 1))}
+          >
+            ›
+          </button>
+          <button
+            className="edgeless-present-exit"
+            title="Exit (Esc)"
+            onClick={() => setPresentIndex(null)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {!presenting && selectionCount > 0 && (
         <div className="canvas-inspector">
           <span className="muted small">
             {selectionCount === 1

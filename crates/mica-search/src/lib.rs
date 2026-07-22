@@ -165,6 +165,7 @@ impl SearchIndex {
                     tag TEXT NOT NULL
                 );
                 CREATE INDEX tags_tag ON tags(tag);
+                CREATE INDEX tags_file ON tags(file_id);
 
                 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 "#,

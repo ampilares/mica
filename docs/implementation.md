@@ -140,6 +140,13 @@ backlinks update after edits; quick search covers titles + full text.
   (light default + dark). Verified: `cargo test` green (incl. new trash /
   meta / docs_list tests), `tsc --noEmit` clean, e2e suites green
   (backend 45/45, UI 27/27 incl. new v2 flows, phase6 22/22).
-- Open (R7): virtualized all-docs list for 10k docs, frames panel +
-  presentation mode, edgeless toolbar bottom-center restyle, settings
-  dialog section restyle, perf validation on the 5k-doc bench vault.
+- 2026-07-22 — R7 complete: virtualized All-docs (windowed rendering above
+  200 rows, 27 DOM rows for 5k docs), AFFiNE edgeless toolbar (bottom-center
+  pill + bottom-left zoom cluster), frames panel + presentation mode,
+  two-pane settings dialog (Appearance/Editor/Workspace/Shortcuts/About),
+  bench tooling (tools/e2e/prepare-bench-vault.mjs + bench.e2e.mjs).
+  Perf fix: tags(file_id) index (schema v4) — docs_list on 5,030 docs went
+  4,341 ms → 45 ms; sidecar detection now one tree walk instead of one stat
+  per doc. Bench (debug build): warm open 256 ms, docs_list 45 ms, search
+  12 ms, cold index build 30 s for 5k docs. e2e: backend 45/45, UI 27/27,
+  phase6 22/22, bench 5/5.

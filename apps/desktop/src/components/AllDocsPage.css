@@ -1,0 +1,13 @@
+/* All docs list: fixed row height + windowing spacers (NFR2-001).
+   Enforcing an exact .docs-row height lets the virtualizer compute
+   spacer/slice math precisely. Keep in sync with ROW_HEIGHT in the .tsx. */
+.docs-row {
+  height: 38px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
+/* Top/bottom spacers standing in for the off-screen rows. */
+.docs-vspacer {
+  flex: none;
+}

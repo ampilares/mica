@@ -981,9 +981,21 @@ pub fn docs_list(state: State<'_, AppState>) -> ApiResult<Vec<DocMeta>> {
         let idx = open.index.lock().unwrap();
         idx.docs_list().map_err(ApiError::from)?
     };
+    // One tree walk beats a filesystem stat per doc on large vaults.
+    let sidecars: std::collections::HashSet<String> = open
+        .vault
+        .scan_tree()
+        .map(|tree| {
+            tree.files()
+                .iter()
+                .filter(|f| f.path.is_sidecar_canvas())
+                .map(|f| f.path.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
     for doc in &mut docs {
         if let Some(sidecar) = doc.path.sidecar_canvas() {
-            doc.has_canvas = open.vault.exists(&sidecar);
+            doc.has_canvas = sidecars.contains(sidecar.as_str());
         }
     }
     Ok(docs)
