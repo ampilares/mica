@@ -81,6 +81,27 @@ export interface LinkGraph {
   edges: { source: string; target: string }[];
 }
 
+/** Mirror of mica-search DocMeta (spec §2.1). */
+export interface DocMeta {
+  path: string;
+  title: string;
+  kind: FileKind;
+  created?: string | null;
+  updated: string;
+  tags: string[];
+  journal?: string | null;
+  has_canvas: boolean;
+}
+
+/** Mirror of mica-vault TrashEntry (spec §2.2). */
+export interface TrashEntry {
+  trash_path: string;
+  original: string;
+  deleted: string;
+  title: string;
+  kind: FileKind;
+}
+
 export type VaultEvent =
   | { type: "created"; path: string }
   | { type: "modified"; path: string }
@@ -195,6 +216,8 @@ export type CellKind =
   | "frame"
   | "note_link"
   | "database_link"
+  | "pen"
+  | "group"
   | "unknown";
 
 export interface Geometry {
@@ -215,6 +238,8 @@ export interface SceneCell {
   style?: string;
   href?: string;
   view?: string;
+  ws_type?: string;
+  ws_parent?: string;
 }
 
 export interface Scene {
@@ -228,7 +253,12 @@ export type CanvasOp =
   | { op: "update_cell"; cell: SceneCell }
   | { op: "remove_cell"; id: string }
   | { op: "rename_scene"; name: string }
-  | { op: "reorder_cell"; id: string; to_index: number };
+  | { op: "reorder_cell"; id: string; to_index: number }
+  | { op: "group_cells"; ids: string[] }
+  | { op: "ungroup_cells"; id: string }
+  | { op: "add_stroke"; cell: SceneCell }
+  | { op: "mindmap_add_child"; parent_id: string; label: string }
+  | { op: "mindmap_add_sibling"; sibling_id: string; label: string };
 
 // ---- commands ----
 
@@ -300,6 +330,46 @@ export const api = {
     invoke<void>("canvas_export", { path, format, dest }),
   exportFile: (dest: string, dataBase64: string) =>
     invoke<void>("export_file", { dest, dataBase64 }),
+
+  docsList: () => invoke<DocMeta[]>("docs_list"),
+  journalEnsure: (date: string) => invoke<LoadedFile>("journal_ensure", { date }),
+  trashMove: (path: string) => invoke<string[]>("trash_move", { path }),
+  trashList: () => invoke<TrashEntry[]>("trash_list"),
+  trashRestore: (trashPath: string) => invoke<string>("trash_restore", { trashPath }),
+  trashPurge: (trashPath?: string) => invoke<number>("trash_purge", { trashPath }),
+  noteMetaGet: (path: string) =>
+    invoke<Record<string, unknown>>("note_meta_get", { path }),
+  noteMetaSet: (path: string, patch: Record<string, unknown>, baseVersion: string) =>
+    invoke<{ content: string; version: string }>("note_meta_set", {
+      path,
+      patch,
+      baseVersion,
+    }),
+  canvasSidecarEnsure: (path: string) =>
+    invoke<LoadedFile>("canvas_sidecar_ensure", { path }),
+  assetStat: (path: string) =>
+    invoke<{ size: number; mtime: string }>("asset_stat", { path }),
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
+  linkPreview: (url: string) =>
+    invoke<{ title: string; description: string; favicon: string }>("link_preview", {
+      url,
+    }),
+  noteSection: (path: string, heading?: string) =>
+    invoke<string>("note_section", { path, heading }),
+  templateList: () =>
+    invoke<{ path: string; title: string }[]>("template_list"),
+  templateInstantiate: (template: string, title: string, dir?: string) =>
+    invoke<LoadedFile>("template_instantiate", { template, title, dir }),
+  historyList: (path: string) =>
+    invoke<{ stamp: string; size: number }[]>("history_list", { path }),
+  historyRead: (path: string, stamp: string) =>
+    invoke<string>("history_read", { path, stamp }),
+  historyRestore: (path: string, stamp: string, baseVersion: string) =>
+    invoke<{ content: string; version: string }>("history_restore", {
+      path,
+      stamp,
+      baseVersion,
+    }),
 
   searchQuery: (query: string, limit?: number) =>
     invoke<SearchHit[]>("search_query", { query, limit }),

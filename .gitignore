@@ -15,3 +15,7 @@ Thumbs.db
 
 # Tauri
 crates/mica-tauri/gen/
+
+# Vendored reference checkouts (e.g. AFFiNE source) and scratch files
+references/
+tmp/

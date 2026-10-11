@@ -1,0 +1,92 @@
+/* Version history panel (FR21-HIS-002): snapshot list + diff-against-current. */
+.history-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+}
+
+.history-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 6px 12px;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.history-item:hover {
+  background: var(--bg-hover);
+}
+
+.history-item.active {
+  background: var(--bg-active);
+}
+
+.history-when {
+  font-size: 12px;
+}
+
+.history-size {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.history-error {
+  color: var(--danger);
+  font-size: 12px;
+  padding: 6px 12px;
+}
+
+/* Diff-against-current preview. Added/removed lines carry a subtle tint from
+   the shared status colors so light + dark both stay legible. */
+.history-diff {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  padding: 6px 0;
+}
+
+.history-diff-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0 12px 0 20px;
+  text-indent: -8px;
+}
+
+.history-diff-line.added {
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+}
+
+.history-diff-line.removed {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+.history-diff-line.same {
+  color: var(--text-muted);
+}
+
+.history-restore {
+  margin: 8px 12px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.history-restore:hover {
+  background: var(--bg-hover);
+}

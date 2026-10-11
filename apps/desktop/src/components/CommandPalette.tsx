@@ -67,22 +67,19 @@ export default function CommandPalette() {
       },
     },
     {
-      id: "search",
-      label: "Search in vault",
-      hint: "Ctrl+Shift+F",
-      run: () => useStore.getState().setSearchOpen(true),
-    },
-    {
-      id: "quick-switch",
-      label: "Go to file…",
-      hint: "Ctrl+P",
-      run: () => useStore.getState().setQuickSwitcherOpen(true),
+      id: "quick-search",
+      label: "Quick search…",
+      hint: "Ctrl+K",
+      run: () => useStore.getState().setQuickSearchOpen(true),
     },
     {
       id: "toggle-right",
       label: "Toggle right panel",
-      hint: "outline · backlinks",
-      run: () => useStore.getState().setRightPanelOpen(!useStore.getState().rightPanelOpen),
+      hint: "Ctrl+.",
+      run: () => {
+        const s = useStore.getState();
+        s.setRightPanelTab(s.rightPanelTab ? null : "outline");
+      },
     },
     ...(activePath?.endsWith(".md")
       ? [

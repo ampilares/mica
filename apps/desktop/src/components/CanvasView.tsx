@@ -4,6 +4,7 @@ import { api, CanvasOp, CellKind, Scene, SceneCell, isApiError } from "../api";
 import { docEvents } from "../docEvents";
 import { useStore, kindOfPath, titleOfPath } from "../store";
 import { relativeTo } from "../editor/paths";
+import "./CanvasView.css";
 
 type Tool =
   | "select"
@@ -14,7 +15,8 @@ type Tool =
   | "text"
   | "sticky"
   | "connector"
-  | "frame";
+  | "frame"
+  | "pen";
 
 const SHAPE_DEFAULT_SIZE: Record<string, { w: number; h: number }> = {
   rectangle: { w: 180, h: 80 },
@@ -24,6 +26,69 @@ const SHAPE_DEFAULT_SIZE: Record<string, { w: number; h: number }> = {
   sticky: { w: 180, h: 140 },
   frame: { w: 480, h: 320 },
 };
+
+/** Fixed palette for the style panel (FR21-EDG-001). Canvas content colors are
+ * data (persisted into draw.io style strings), not theme tokens — hex is
+ * correct here. */
+const STYLE_PALETTE = [
+  "#1A1A1A",
+  "#E03131",
+  "#F08C00",
+  "#F1C21B",
+  "#2F9E44",
+  "#1971C2",
+  "#7048E8",
+  "#FFFFFF",
+];
+
+const MINDMAP_NODE = { w: 160, h: 40 };
+
+/** Parse a draw.io style string into a key→value map (bare flag tokens ignored). */
+function parseStyleMap(style?: string): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const token of (style ?? "").split(";")) {
+    const eq = token.indexOf("=");
+    if (eq > 0) map[token.slice(0, eq)] = token.slice(eq + 1);
+  }
+  return map;
+}
+
+/** Merge key/value updates into a style string without clobbering unknown
+ * keys — mirrors `mica_drawio::merge_style`. Preserves bare tokens + order,
+ * updates existing keys in place, appends new ones, ends with a trailing ';'. */
+function mergeStyle(base: string | undefined, updates: Record<string, string>): string {
+  const applied = new Set<string>();
+  const out: string[] = [];
+  for (const token of (base ?? "").split(";")) {
+    if (!token) continue;
+    const eq = token.indexOf("=");
+    if (eq > 0) {
+      const key = token.slice(0, eq);
+      if (key in updates) {
+        out.push(`${key}=${updates[key]}`);
+        applied.add(key);
+        continue;
+      }
+    }
+    out.push(token);
+  }
+  for (const [k, v] of Object.entries(updates)) if (!applied.has(k)) out.push(`${k}=${v}`);
+  return out.join(";") + ";";
+}
+
+/** Extract the polyline points of a pen stroke from its style string. */
+function penPointsFromStyle(style?: string): { x: number; y: number }[] {
+  const m = /points=([^;]*)/.exec(style ?? "");
+  if (!m || !m[1]) return [];
+  return m[1]
+    .trim()
+    .split(/\s+/)
+    .map((p) => {
+      const [x, y] = p.split(",").map(Number);
+      return { x, y };
+    })
+    .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+}
 
 let cellCounter = 0;
 function newCellId(prefix = "shape"): string {
@@ -40,38 +105,28 @@ interface Marquee {
   y2: number;
 }
 
-/** Frame list for quick navigation (FR-CAN-008). */
-function FramesMenu({
-  frames,
-  onJump,
-}: {
-  frames: SceneCell[];
-  onJump: (g: { x: number; y: number; width: number; height: number }) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  if (frames.length === 0) return null;
-  return (
-    <span className="menu-anchor">
-      <button className="small" onClick={() => setOpen(!open)}>
-        Frames ({frames.length}) ▾
-      </button>
-      {open && (
-        <div className="dropdown" onMouseLeave={() => setOpen(false)}>
-          {frames.map((f, i) => (
-            <button
-              key={f.id}
-              onClick={() => {
-                setOpen(false);
-                onJump(f.geometry!);
-              }}
-            >
-              {f.label || `Frame ${i + 1}`}
-            </button>
-          ))}
-        </div>
-      )}
-    </span>
-  );
+/** Frames in stable presentation order (FR2-EDG-002): top-to-bottom, then
+ * left-to-right by frame geometry; ties fall back to scene order (stable
+ * sort). Used by both the frames panel and presentation stepping. */
+function frameOrder(cells: SceneCell[]): SceneCell[] {
+  return cells
+    .filter((c) => c.kind === "frame" && c.geometry)
+    .sort((a, b) => a.geometry!.y - b.geometry!.y || a.geometry!.x - b.geometry!.x);
+}
+
+/** Absolute geometry of a cell, resolving one level of group parenting
+ * (group members store geometry relative to the group origin, FR21-EDG-002). */
+function resolveGeom(
+  cell: SceneCell,
+  byId: Map<string, SceneCell>,
+): SceneCell["geometry"] {
+  const g = cell.geometry;
+  if (!g) return undefined;
+  const p = cell.parent ? byId.get(cell.parent) : undefined;
+  if (p && p.kind === "group" && p.geometry) {
+    return { x: g.x + p.geometry.x, y: g.y + p.geometry.y, width: g.width, height: g.height };
+  }
+  return g;
 }
 
 function ExportMenu({
@@ -111,6 +166,11 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   const [viewBox, setViewBox] = useState({ x: -100, y: -100, zoom: 1 });
   const [editingLabel, setEditingLabel] = useState<string | null>(null);
   const [marquee, setMarquee] = useState<Marquee | null>(null);
+  const [framesPanelOpen, setFramesPanelOpen] = useState(false);
+  // Presentation step index (FR2-EDG-002 P1); null = not presenting.
+  const [presentIndex, setPresentIndex] = useState<number | null>(null);
+  // Live pen stroke points in world coords while drawing (FR21-EDG-003).
+  const [penPoints, setPenPoints] = useState<{ x: number; y: number }[] | null>(null);
 
   const svgRef = useRef<SVGSVGElement>(null);
   const pathRef = useRef(path);
@@ -121,9 +181,12 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   sceneRef.current = scene;
   const selectedRef = useRef(selected);
   selectedRef.current = selected;
+  // Source of truth for the in-progress pen stroke (state mirrors it for
+  // rendering; the ref stays accurate for the commit on mouse-up).
+  const penRef = useRef<{ x: number; y: number }[]>([]);
 
   const dragState = useRef<{
-    mode: "move" | "pan" | "resize" | "marquee";
+    mode: "move" | "pan" | "resize" | "marquee" | "pen";
     cellId?: string;
     startX: number;
     startY: number;
@@ -193,20 +256,27 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   };
 
   /** Cells that should move together with `cell`: itself, other selected
-   * cells, and — for frames — every cell geometrically inside the frame. */
+   * cells, and — for frames — every cell geometrically inside the frame.
+   * Group members are excluded: moving the group cell (which stores absolute
+   * geometry) carries them along because their geometry is group-relative
+   * (FR21-EDG-002). */
   const dragGroup = (cell: SceneCell): SceneCell[] => {
     const s = sceneRef.current;
     if (!s) return [cell];
+    const byId = new Map(s.cells.map((c) => [c.id, c]));
+    const isGroupedMember = (c: SceneCell) =>
+      c.parent != null && byId.get(c.parent)?.kind === "group";
     const ids = new Set<string>(
       selectedRef.current.has(cell.id) ? selectedRef.current : [cell.id],
     );
     for (const id of [...ids]) {
-      const c = s.cells.find((x) => x.id === id);
+      const c = byId.get(id);
       if (c?.kind === "frame" && c.geometry) {
         const f = c.geometry;
         for (const other of s.cells) {
           if (other.id === c.id || !other.geometry || other.kind === "connector") continue;
-          const g = other.geometry;
+          if (isGroupedMember(other)) continue;
+          const g = resolveGeom(other, byId)!;
           const cx = g.x + g.width / 2;
           const cy = g.y + g.height / 2;
           if (cx >= f.x && cx <= f.x + f.width && cy >= f.y && cy <= f.y + f.height) {
@@ -215,7 +285,9 @@ export default function CanvasView({ path, active }: { path: string; active: boo
         }
       }
     }
-    return s.cells.filter((c) => ids.has(c.id) && c.geometry != null);
+    return s.cells.filter(
+      (c) => ids.has(c.id) && c.geometry != null && !isGroupedMember(c),
+    );
   };
 
   const onCanvasMouseDown = (e: React.MouseEvent) => {
@@ -226,6 +298,13 @@ export default function CanvasView({ path, active }: { path: string; active: boo
         startY: e.clientY,
         origView: { x: viewBox.x, y: viewBox.y },
       };
+      return;
+    }
+    if (tool === "pen") {
+      const { x, y } = toWorld(e.clientX, e.clientY);
+      dragState.current = { mode: "pen", startX: x, startY: y };
+      penRef.current = [{ x, y }];
+      setPenPoints([{ x, y }]);
       return;
     }
     if (tool !== "select" && tool !== "connector") {
@@ -257,8 +336,15 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     setConnectFrom(null);
   };
 
-  const onCellMouseDown = (e: React.MouseEvent, cell: SceneCell) => {
+  const onCellMouseDown = (e: React.MouseEvent, rawCell: SceneCell) => {
     e.stopPropagation();
+    // Clicking a group member selects/drags the whole group (draw.io behavior).
+    const s0 = sceneRef.current;
+    let cell = rawCell;
+    if (s0 && rawCell.parent) {
+      const p = s0.cells.find((c) => c.id === rawCell.parent);
+      if (p?.kind === "group") cell = p;
+    }
     if (tool === "connector") {
       if (!connectFrom) {
         setConnectFrom(cell.id);
@@ -328,6 +414,16 @@ export default function CanvasView({ path, active }: { path: string; active: boo
       setMarquee({ x1: drag.startX, y1: drag.startY, x2: x, y2: y });
       return;
     }
+    if (drag.mode === "pen") {
+      // Throttle to ~4px of movement to keep strokes compact.
+      const pts = penRef.current;
+      const last = pts[pts.length - 1];
+      if (!last || Math.hypot(x - last.x, y - last.y) >= 4) {
+        penRef.current = [...pts, { x, y }];
+        setPenPoints(penRef.current);
+      }
+      return;
+    }
     const dx = x - drag.startX;
     const dy = y - drag.startY;
     if (drag.mode === "move") {
@@ -374,14 +470,40 @@ export default function CanvasView({ path, active }: { path: string; active: boo
       if (m && scene && (Math.abs(m.x2 - m.x1) > 4 || Math.abs(m.y2 - m.y1) > 4)) {
         const [minX, maxX] = [Math.min(m.x1, m.x2), Math.max(m.x1, m.x2)];
         const [minY, maxY] = [Math.min(m.y1, m.y2), Math.max(m.y1, m.y2)];
+        const byId = new Map(scene.cells.map((c) => [c.id, c]));
         const hit = scene.cells
           .filter((c) => c.geometry && c.kind !== "connector")
+          // Group members are represented by their group, not selected directly.
+          .filter((c) => !(c.parent && byId.get(c.parent)?.kind === "group"))
           .filter((c) => {
-            const g = c.geometry!;
+            const g = resolveGeom(c, byId)!;
             return g.x >= minX && g.x + g.width <= maxX && g.y >= minY && g.y + g.height <= maxY;
           })
           .map((c) => c.id);
         if (hit.length) setSelected(new Set(hit));
+      }
+      return;
+    }
+    if (drag.mode === "pen") {
+      const pts = penRef.current;
+      penRef.current = [];
+      setPenPoints(null);
+      if (pts.length >= 2) {
+        const xs = pts.map((p) => p.x);
+        const ys = pts.map((p) => p.y);
+        const minX = Math.min(...xs);
+        const minY = Math.min(...ys);
+        const width = Math.max(1, Math.max(...xs) - minX);
+        const height = Math.max(1, Math.max(...ys) - minY);
+        const pointStr = pts.map((p) => `${Math.round(p.x)},${Math.round(p.y)}`).join(" ");
+        const cell: SceneCell = {
+          id: newCellId("pen"),
+          kind: "pen",
+          label: "",
+          geometry: { x: Math.round(minX), y: Math.round(minY), width: Math.round(width), height: Math.round(height) },
+          style: `shape=mica-pen;points=${pointStr};strokeColor=#1A1A1A;strokeWidth=2;`,
+        };
+        void apply([{ op: "add_stroke", cell }]);
       }
       return;
     }
@@ -420,7 +542,10 @@ export default function CanvasView({ path, active }: { path: string; active: boo
 
   const zoomToFit = () => {
     if (!scene || !svgRef.current) return;
-    const boxes = scene.cells.filter((c) => c.geometry).map((c) => c.geometry!);
+    const byId = new Map(scene.cells.map((c) => [c.id, c]));
+    const boxes = scene.cells
+      .filter((c) => c.geometry && !(c.parent && byId.get(c.parent)?.kind === "group"))
+      .map((c) => resolveGeom(c, byId)!);
     if (boxes.length === 0) {
       setViewBox({ x: -100, y: -100, zoom: 1 });
       return;
@@ -457,6 +582,19 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     });
   };
 
+  /** Zoom by a factor about the canvas center, reusing the same viewBox
+   * transform as wheel-zoom (FR2-EDG-001 zoom cluster). */
+  const zoomBy = (factor: number) => {
+    if (!svgRef.current) return;
+    const rect = svgRef.current.getBoundingClientRect();
+    setViewBox((v) => {
+      const zoom = Math.min(4, Math.max(0.1, v.zoom * factor));
+      const cx = rect.width / 2 / v.zoom + v.x;
+      const cy = rect.height / 2 / v.zoom + v.y;
+      return { zoom, x: cx - rect.width / 2 / zoom, y: cy - rect.height / 2 / zoom };
+    });
+  };
+
   /** Standalone SVG of the current scene: DOM clone + inlined styles. */
   const buildExportSvg = (): string | null => {
     const src = svgRef.current;
@@ -487,7 +625,10 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     // Strip interaction-only artifacts.
     clone.querySelectorAll(".marquee, .handle, foreignObject").forEach((el) => el.remove());
     // Frame the content.
-    const boxes = s.cells.filter((c) => c.geometry).map((c) => c.geometry!);
+    const byId = new Map(s.cells.map((c) => [c.id, c]));
+    const boxes = s.cells
+      .filter((c) => c.geometry && !(c.parent && byId.get(c.parent)?.kind === "group"))
+      .map((c) => resolveGeom(c, byId)!);
     if (boxes.length === 0) return null;
     const minX = Math.min(...boxes.map((g) => g.x)) - 40;
     const minY = Math.min(...boxes.map((g) => g.y)) - 40;
@@ -618,6 +759,124 @@ export default function CanvasView({ path, active }: { path: string; active: boo
     [apply],
   );
 
+  // FR21-EDG-002: group the current multi-selection (Ctrl+G).
+  const groupSelection = useCallback(() => {
+    const s = sceneRef.current;
+    if (!s) return;
+    const ids = [...selectedRef.current].filter((id) => {
+      const c = s.cells.find((x) => x.id === id);
+      return c && c.geometry != null && c.kind !== "connector" && c.kind !== "group";
+    });
+    if (ids.length < 2) return;
+    void apply([{ op: "group_cells", ids }]).then(() => {
+      const ns = sceneRef.current;
+      const grp = ns?.cells.find(
+        (c) => c.kind === "group" && ids.every((id) => ns.cells.some((m) => m.id === id && m.parent === c.id)),
+      );
+      if (grp) setSelected(new Set([grp.id]));
+    });
+  }, [apply]);
+
+  // FR21-EDG-002: ungroup the selected group cell(s) (Ctrl+Shift+G).
+  const ungroupSelection = useCallback(() => {
+    const s = sceneRef.current;
+    if (!s) return;
+    const groups = [...selectedRef.current]
+      .map((id) => s.cells.find((c) => c.id === id))
+      .filter((c): c is SceneCell => !!c && c.kind === "group");
+    if (!groups.length) return;
+    const memberIds = s.cells
+      .filter((c) => c.parent && groups.some((g) => g.id === c.parent))
+      .map((c) => c.id);
+    void apply(groups.map((g) => ({ op: "ungroup_cells", id: g.id }) as CanvasOp)).then(() =>
+      setSelected(new Set(memberIds)),
+    );
+  }, [apply]);
+
+  const mindmapNodeIds = (s: Scene) =>
+    new Set(s.cells.filter((c) => c.ws_type === "mindmap" && c.kind !== "connector").map((c) => c.id));
+
+  // After a mindmap op, select + label-edit the newly created node.
+  const focusNewMindmapNode = useCallback(
+    (before: Set<string>) => {
+      const ns = sceneRef.current;
+      if (!ns) return;
+      const created = ns.cells.find(
+        (c) => c.ws_type === "mindmap" && c.kind !== "connector" && !before.has(c.id),
+      );
+      if (created) {
+        setSelected(new Set([created.id]));
+        setEditingLabel(created.id);
+      }
+    },
+    [],
+  );
+
+  // FR21-EDG-004: insert a standalone mind map root at the viewport center.
+  const insertMindmapRoot = useCallback(() => {
+    const rect = svgRef.current?.getBoundingClientRect();
+    const cx = rect ? rect.width / 2 / viewBox.zoom + viewBox.x : 0;
+    const cy = rect ? rect.height / 2 / viewBox.zoom + viewBox.y : 0;
+    const cell: SceneCell = {
+      id: newCellId("node"),
+      kind: "rectangle",
+      label: "Idea",
+      geometry: {
+        x: Math.round(cx - MINDMAP_NODE.w / 2),
+        y: Math.round(cy - MINDMAP_NODE.h / 2),
+        width: MINDMAP_NODE.w,
+        height: MINDMAP_NODE.h,
+      },
+      style: "rounded=1;whiteSpace=wrap;html=1;fillColor=#EEF2FF;strokeColor=#6C8EBF;",
+      ws_type: "mindmap",
+    };
+    void apply([{ op: "add_cell", cell }]).then(() => {
+      setSelected(new Set([cell.id]));
+      setEditingLabel(cell.id);
+    });
+  }, [apply, viewBox]);
+
+  const mindmapAddChild = useCallback(
+    (parentId: string) => {
+      const s = sceneRef.current;
+      if (!s) return;
+      const before = mindmapNodeIds(s);
+      void apply([{ op: "mindmap_add_child", parent_id: parentId, label: "Idea" }]).then(() =>
+        focusNewMindmapNode(before),
+      );
+    },
+    [apply, focusNewMindmapNode],
+  );
+
+  const mindmapAddSibling = useCallback(
+    (siblingId: string) => {
+      const s = sceneRef.current;
+      if (!s) return;
+      const before = mindmapNodeIds(s);
+      void apply([{ op: "mindmap_add_sibling", sibling_id: siblingId, label: "Idea" }]).then(() =>
+        focusNewMindmapNode(before),
+      );
+    },
+    [apply, focusNewMindmapNode],
+  );
+
+  // FR21-EDG-001: merge style keys into every selected cell (never clobbering
+  // unknown keys) via update_cell ops.
+  const applyStyleUpdate = useCallback(
+    (updates: Record<string, string>) => {
+      const s = sceneRef.current;
+      if (!s) return;
+      const ops: CanvasOp[] = [];
+      for (const id of selectedRef.current) {
+        const cell = s.cells.find((c) => c.id === id);
+        if (!cell) continue;
+        ops.push({ op: "update_cell", cell: { ...cell, style: mergeStyle(cell.style, updates) } });
+      }
+      if (ops.length) void apply(ops);
+    },
+    [apply],
+  );
+
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
@@ -640,12 +899,61 @@ export default function CanvasView({ path, active }: { path: string; active: boo
         e.preventDefault();
         const s = sceneRef.current;
         if (s) setSelected(new Set(s.cells.filter((c) => c.kind !== "connector").map((c) => c.id)));
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
+        // FR21-EDG-002: Ctrl+G group / Ctrl+Shift+G ungroup.
+        e.preventDefault();
+        if (e.shiftKey) ungroupSelection();
+        else groupSelection();
+      } else if ((e.key === "Tab" || e.key === "Enter") && !editingLabel && selectedRef.current.size === 1) {
+        // FR21-EDG-004: grow the mind map from the selected node.
+        const s = sceneRef.current;
+        const id = [...selectedRef.current][0];
+        const cell = s?.cells.find((c) => c.id === id);
+        if (cell && cell.ws_type === "mindmap" && cell.kind !== "connector") {
+          e.preventDefault();
+          if (e.key === "Tab") mindmapAddChild(id);
+          else mindmapAddSibling(id);
+        }
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, editingLabel, deleteSelected, duplicateSelected]);
+  }, [
+    active,
+    editingLabel,
+    deleteSelected,
+    duplicateSelected,
+    groupSelection,
+    ungroupSelection,
+    mindmapAddChild,
+    mindmapAddSibling,
+  ]);
+
+  // Presentation mode (FR2-EDG-002 P1): fit the current frame on every step
+  // change and, while active, own Arrow/Escape via a scoped listener that is
+  // removed on exit.
+  useEffect(() => {
+    if (presentIndex === null) return;
+    const frames = frameOrder(sceneRef.current?.cells ?? []);
+    const f = frames[presentIndex];
+    if (f?.geometry) zoomToRect(f.geometry);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "ArrowRight" || e.key === " ") {
+        e.preventDefault();
+        setPresentIndex((i) => Math.min((i ?? 0) + 1, frames.length - 1));
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setPresentIndex((i) => Math.max((i ?? 0) - 1, 0));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setPresentIndex(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presentIndex]);
 
   // Drop a note/database dragged from the sidebar → link cell.
   const onDrop = (e: React.DragEvent) => {
@@ -672,51 +980,37 @@ export default function CanvasView({ path, active }: { path: string; active: boo
   const vertices = scene.cells.filter((c) => c.kind !== "connector");
   const edges = scene.cells.filter((c) => c.kind === "connector");
   const selectionCount = selected.size;
+  const frames = frameOrder(scene.cells);
+  const presenting = presentIndex !== null;
+  // Resolved absolute geometry for every cell (groups offset their members).
+  const cellsById = new Map(scene.cells.map((c) => [c.id, c]));
+  const geomById = new Map<string, NonNullable<SceneCell["geometry"]>>();
+  for (const c of scene.cells) {
+    const g = resolveGeom(c, cellsById);
+    if (g) geomById.set(c.id, g);
+  }
+  // Style of the first selected cell drives the panel's active-state markers.
+  const selectedCells = scene.cells.filter((c) => selected.has(c.id));
+  const styleMap0: Record<string, string> = selectedCells.length
+    ? parseStyleMap(selectedCells[0].style)
+    : {};
 
-  const TOOLS: { id: Tool; label: string }[] = [
-    { id: "select", label: "Select" },
-    { id: "hand", label: "Hand" },
-    { id: "rectangle", label: "Rect" },
-    { id: "ellipse", label: "Ellipse" },
-    { id: "diamond", label: "Diamond" },
-    { id: "text", label: "Text" },
-    { id: "sticky", label: "Sticky" },
-    { id: "connector", label: "Connect" },
-    { id: "frame", label: "Frame" },
+  // Compact glyph + title tooltip; behavior/shortcuts unchanged (FR2-EDG-001).
+  const TOOLS: { id: Tool; glyph: string; label: string }[] = [
+    { id: "select", glyph: "↖", label: "Select" },
+    { id: "hand", glyph: "✋", label: "Hand (pan)" },
+    { id: "rectangle", glyph: "▭", label: "Rectangle" },
+    { id: "ellipse", glyph: "◯", label: "Ellipse" },
+    { id: "diamond", glyph: "◇", label: "Diamond" },
+    { id: "text", glyph: "T", label: "Text" },
+    { id: "sticky", glyph: "🗒", label: "Sticky note" },
+    { id: "connector", glyph: "⇢", label: "Connector" },
+    { id: "frame", glyph: "⛶", label: "Frame" },
+    { id: "pen", glyph: "✏", label: "Pen (freehand)" },
   ];
 
   return (
-    <div className="canvas-view">
-      <div className="canvas-toolbar">
-        {TOOLS.map((t) => (
-          <button
-            key={t.id}
-            className={tool === t.id ? "active" : ""}
-            onClick={() => {
-              setTool(t.id);
-              setConnectFrom(null);
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-        <div className="spacer" />
-        <FramesMenu
-          frames={scene.cells.filter((c) => c.kind === "frame" && c.geometry)}
-          onJump={(g) => zoomToRect(g)}
-        />
-        <ExportMenu onExport={(f) => void exportCanvas(f)} />
-        <button onClick={zoomToFit} title="Zoom to fit (Ctrl+1)">
-          Fit
-        </button>
-        <button
-          onClick={() => setViewBox({ x: -100, y: -100, zoom: 1 })}
-          title="Reset zoom (Ctrl+0)"
-        >
-          100%
-        </button>
-        <span className="muted small">{Math.round(viewBox.zoom * 100)}%</span>
-      </div>
+    <div className="canvas-view canvas-edgeless">
       {error && <div className="banner warning">{error}</div>}
       {connectFrom && <div className="banner info">Click a second shape to connect.</div>}
       <svg
@@ -750,7 +1044,7 @@ export default function CanvasView({ path, active }: { path: string; active: boo
             <EdgeShape
               key={edge.id}
               edge={edge}
-              cells={vertices}
+              geomById={geomById}
               selected={selected.has(edge.id)}
               onMouseDown={(e) => {
                 e.stopPropagation();
@@ -762,6 +1056,7 @@ export default function CanvasView({ path, active }: { path: string; active: boo
             <VertexShape
               key={cell.id}
               cell={cell}
+              geom={geomById.get(cell.id)}
               selected={selected.has(cell.id)}
               connectCandidate={tool === "connector"}
               connectFrom={connectFrom === cell.id}
@@ -776,6 +1071,13 @@ export default function CanvasView({ path, active }: { path: string; active: boo
               }}
             />
           ))}
+          {penPoints && penPoints.length > 1 && (
+            <polyline
+              className="pen-live"
+              points={penPoints.map((p) => `${p.x},${p.y}`).join(" ")}
+              fill="none"
+            />
+          )}
           {marquee && (
             <rect
               className="marquee"
@@ -787,7 +1089,206 @@ export default function CanvasView({ path, active }: { path: string; active: boo
           )}
         </g>
       </svg>
-      {selectionCount > 0 && (
+
+      {/* FR21-EDG-001: selection-scoped style panel, top-right. */}
+      {!presenting && selectionCount > 0 && (
+        <div className="edgeless-float edgeless-style">
+          <div className="edgeless-style-row">
+            <span className="edgeless-style-label">Fill</span>
+            <div className="edgeless-swatches">
+              <button
+                className={`swatch swatch-none${styleMap0.fillColor === "none" ? " active" : ""}`}
+                title="No fill"
+                aria-label="No fill"
+                onClick={() => applyStyleUpdate({ fillColor: "none" })}
+              />
+              {STYLE_PALETTE.map((c) => (
+                <button
+                  key={`fill-${c}`}
+                  className={`swatch${styleMap0.fillColor === c ? " active" : ""}`}
+                  style={{ background: c }}
+                  title={`Fill ${c}`}
+                  aria-label={`Fill ${c}`}
+                  onClick={() => applyStyleUpdate({ fillColor: c })}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="edgeless-style-row">
+            <span className="edgeless-style-label">Stroke</span>
+            <div className="edgeless-swatches">
+              {STYLE_PALETTE.map((c) => (
+                <button
+                  key={`stroke-${c}`}
+                  className={`swatch${styleMap0.strokeColor === c ? " active" : ""}`}
+                  style={{ background: c }}
+                  title={`Stroke ${c}`}
+                  aria-label={`Stroke ${c}`}
+                  onClick={() => applyStyleUpdate({ strokeColor: c })}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="edgeless-style-row">
+            <span className="edgeless-style-label">Width</span>
+            <div className="edgeless-seg">
+              {["1", "2", "4"].map((w) => (
+                <button
+                  key={`w-${w}`}
+                  className={styleMap0.strokeWidth === w ? "active" : ""}
+                  onClick={() => applyStyleUpdate({ strokeWidth: w })}
+                >
+                  {w}
+                </button>
+              ))}
+            </div>
+            <span className="edgeless-style-label">Text</span>
+            <div className="edgeless-seg">
+              {[
+                ["S", "12"],
+                ["M", "16"],
+                ["L", "24"],
+              ].map(([lbl, v]) => (
+                <button
+                  key={`t-${v}`}
+                  className={styleMap0.fontSize === v ? "active" : ""}
+                  onClick={() => applyStyleUpdate({ fontSize: v })}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FR2-EDG-001: zoom cluster, bottom left. */}
+      {!presenting && (
+        <div className="edgeless-float edgeless-zoom">
+          <button onClick={() => zoomBy(1 / 1.2)} title="Zoom out">
+            −
+          </button>
+          <button
+            className="edgeless-pct"
+            onClick={() => setViewBox({ x: -100, y: -100, zoom: 1 })}
+            title="Reset zoom (Ctrl+0)"
+          >
+            {Math.round(viewBox.zoom * 100)}%
+          </button>
+          <button onClick={() => zoomBy(1.2)} title="Zoom in">
+            +
+          </button>
+          <button onClick={zoomToFit} title="Zoom to fit (Ctrl+1)">
+            ⤢
+          </button>
+        </div>
+      )}
+
+      {/* FR2-EDG-001: centered pill tool toolbar, bottom center. */}
+      {!presenting && (
+        <div className="edgeless-float edgeless-tools">
+          {TOOLS.map((t) => (
+            <button
+              key={t.id}
+              className={tool === t.id ? "active" : ""}
+              title={t.label}
+              aria-label={t.label}
+              onClick={() => {
+                setTool(t.id);
+                setConnectFrom(null);
+              }}
+            >
+              {t.glyph}
+            </button>
+          ))}
+          <span className="edgeless-sep" />
+          <button
+            title="Insert mind map node (Tab: child, Enter: sibling)"
+            aria-label="Insert mind map"
+            onClick={insertMindmapRoot}
+          >
+            🧠
+          </button>
+          <button
+            className={framesPanelOpen ? "active" : ""}
+            title="Frames panel"
+            aria-label="Frames panel"
+            onClick={() => setFramesPanelOpen((v) => !v)}
+          >
+            ⊞
+          </button>
+          <button
+            title={frames.length ? "Present frames" : "Add a frame to present"}
+            aria-label="Present"
+            disabled={frames.length === 0}
+            onClick={() => frames.length && setPresentIndex(0)}
+          >
+            ▷
+          </button>
+          <ExportMenu onExport={(f) => void exportCanvas(f)} />
+        </div>
+      )}
+
+      {/* FR2-EDG-002: frames panel overlay, right side. */}
+      {!presenting && framesPanelOpen && (
+        <div className="edgeless-float edgeless-frames">
+          <div className="edgeless-frames-head">
+            <span>Frames ({frames.length})</span>
+            <button className="icon-button" title="Close" onClick={() => setFramesPanelOpen(false)}>
+              ✕
+            </button>
+          </div>
+          <div className="edgeless-frames-list">
+            {frames.length === 0 ? (
+              <div className="edgeless-empty">No frames yet. Use the Frame tool to add one.</div>
+            ) : (
+              frames.map((f, i) => (
+                <button key={f.id} onClick={() => zoomToRect(f.geometry!)}>
+                  <span className="edgeless-frame-idx">{i + 1}</span>
+                  <span>{f.label || `Frame ${i + 1}`}</span>
+                </button>
+              ))
+            )}
+          </div>
+          <div className="edgeless-frames-foot">
+            <button disabled={frames.length === 0} onClick={() => setPresentIndex(0)}>
+              ▷ Present
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* FR2-EDG-002 P1: presentation controls (Arrow/Esc handled in effect). */}
+      {presenting && (
+        <div className="edgeless-present">
+          <button
+            title="Previous (←)"
+            disabled={presentIndex === 0}
+            onClick={() => setPresentIndex((i) => Math.max((i ?? 0) - 1, 0))}
+          >
+            ‹
+          </button>
+          <span className="edgeless-present-count">
+            {(presentIndex ?? 0) + 1} / {frames.length}
+          </span>
+          <button
+            title="Next (→)"
+            disabled={presentIndex === frames.length - 1}
+            onClick={() => setPresentIndex((i) => Math.min((i ?? 0) + 1, frames.length - 1))}
+          >
+            ›
+          </button>
+          <button
+            className="edgeless-present-exit"
+            title="Exit (Esc)"
+            onClick={() => setPresentIndex(null)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {!presenting && selectionCount > 0 && (
         <div className="canvas-inspector">
           <span className="muted small">
             {selectionCount === 1
@@ -814,6 +1315,7 @@ export default function CanvasView({ path, active }: { path: string; active: boo
 
 function VertexShape({
   cell,
+  geom,
   selected,
   connectCandidate,
   connectFrom,
@@ -824,6 +1326,7 @@ function VertexShape({
   onLabelCommit,
 }: {
   cell: SceneCell;
+  geom?: SceneCell["geometry"];
   selected: boolean;
   connectCandidate: boolean;
   connectFrom: boolean;
@@ -833,16 +1336,62 @@ function VertexShape({
   onResizeMouseDown: (e: React.MouseEvent) => void;
   onLabelCommit: (label: string) => void;
 }) {
-  const g = cell.geometry ?? { x: 0, y: 0, width: 120, height: 60 };
+  const g = geom ?? cell.geometry ?? { x: 0, y: 0, width: 120, height: 60 };
   const cls = `cell cell-${cell.kind} ${selected ? "selected" : ""} ${
     connectCandidate ? "connectable" : ""
   } ${connectFrom ? "connect-from" : ""}`;
+
+  // Style-panel keys applied inline (they win over the CSS class defaults).
+  // Stroke overrides are suppressed while selected so the accent selection
+  // outline stays visible (FR21-EDG-001).
+  const sm = parseStyleMap(cell.style);
+  const shapeStyle: React.CSSProperties = {};
+  if (sm.fillColor) shapeStyle.fill = sm.fillColor;
+  if (!selected && sm.strokeColor) shapeStyle.stroke = sm.strokeColor;
+  if (!selected && sm.strokeWidth) shapeStyle.strokeWidth = Number(sm.strokeWidth);
+  const textStyle: React.CSSProperties = {};
+  if (sm.fontSize) textStyle.fontSize = Number(sm.fontSize);
+
+  // Pen strokes render as an absolute polyline from the style points.
+  if (cell.kind === "pen") {
+    const pts = penPointsFromStyle(cell.style);
+    const stroke = sm.strokeColor || "#1A1A1A";
+    const sw = sm.strokeWidth ? Number(sm.strokeWidth) : 2;
+    return (
+      <g className={cls} onMouseDown={onMouseDown} onDoubleClick={onDoubleClick}>
+        {selected && (
+          <rect
+            className="pen-bounds"
+            x={g.x - 3}
+            y={g.y - 3}
+            width={g.width + 6}
+            height={g.height + 6}
+          />
+        )}
+        <polyline
+          className="cell-pen-line"
+          points={pts.map((p) => `${p.x},${p.y}`).join(" ")}
+          fill="none"
+          stroke={selected ? "var(--accent)" : stroke}
+          strokeWidth={sw}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </g>
+    );
+  }
 
   let shape: JSX.Element;
   switch (cell.kind) {
     case "ellipse":
       shape = (
-        <ellipse cx={g.x + g.width / 2} cy={g.y + g.height / 2} rx={g.width / 2} ry={g.height / 2} />
+        <ellipse
+          cx={g.x + g.width / 2}
+          cy={g.y + g.height / 2}
+          rx={g.width / 2}
+          ry={g.height / 2}
+          style={shapeStyle}
+        />
       );
       break;
     case "diamond":
@@ -851,15 +1400,26 @@ function VertexShape({
           points={`${g.x + g.width / 2},${g.y} ${g.x + g.width},${g.y + g.height / 2} ${
             g.x + g.width / 2
           },${g.y + g.height} ${g.x},${g.y + g.height / 2}`}
+          style={shapeStyle}
         />
       );
       break;
     case "frame":
-      shape = <rect x={g.x} y={g.y} width={g.width} height={g.height} rx={2} />;
+      shape = <rect x={g.x} y={g.y} width={g.width} height={g.height} rx={2} style={shapeStyle} />;
+      break;
+    case "group":
+      shape = <rect x={g.x} y={g.y} width={g.width} height={g.height} rx={4} style={shapeStyle} />;
       break;
     default:
       shape = (
-        <rect x={g.x} y={g.y} width={g.width} height={g.height} rx={cell.kind === "sticky" ? 2 : 8} />
+        <rect
+          x={g.x}
+          y={g.y}
+          width={g.width}
+          height={g.height}
+          rx={cell.kind === "sticky" ? 2 : 8}
+          style={shapeStyle}
+        />
       );
   }
 
@@ -887,6 +1447,7 @@ function VertexShape({
           y={cell.kind === "frame" ? g.y + 16 : g.y + g.height / 2}
           textAnchor="middle"
           dominantBaseline="middle"
+          style={textStyle}
         >
           {cell.label}
         </text>
@@ -901,7 +1462,7 @@ function VertexShape({
           {cell.kind === "note_link" ? "📄 note" : "🗃️ database"}
         </text>
       )}
-      {selected && (
+      {selected && cell.kind !== "group" && (
         <rect
           className="resize-handle"
           x={g.x + g.width - 6}
@@ -917,20 +1478,18 @@ function VertexShape({
 
 function EdgeShape({
   edge,
-  cells,
+  geomById,
   selected,
   onMouseDown,
 }: {
   edge: SceneCell;
-  cells: SceneCell[];
+  geomById: Map<string, NonNullable<SceneCell["geometry"]>>;
   selected: boolean;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
-  const source = cells.find((c) => c.id === edge.source);
-  const target = cells.find((c) => c.id === edge.target);
-  if (!source?.geometry || !target?.geometry) return null;
-  const s = source.geometry;
-  const t = target.geometry;
+  const s = edge.source ? geomById.get(edge.source) : undefined;
+  const t = edge.target ? geomById.get(edge.target) : undefined;
+  if (!s || !t) return null;
   const x1 = s.x + s.width / 2;
   const y1 = s.y + s.height / 2;
   const x2 = t.x + t.width / 2;
@@ -974,6 +1533,8 @@ function parseSceneFromXml(xml: string): Scene {
     if (wsType === "note-link") kind = "note_link";
     else if (wsType === "database-link") kind = "database_link";
     else if (isEdge) kind = "connector";
+    else if (style.startsWith("shape=mica-pen")) kind = "pen";
+    else if (style === "group" || style.startsWith("group;")) kind = "group";
     else if (style.startsWith("shape=note")) kind = "sticky";
     else if (style.startsWith("shape=frame")) kind = "frame";
     else if (style.startsWith("text")) kind = "text";
@@ -1006,6 +1567,9 @@ function parseSceneFromXml(xml: string): Scene {
       style: style || undefined,
       href: el.getAttribute("data-workspace-href") ?? undefined,
       view: el.getAttribute("data-workspace-view") ?? undefined,
+      ws_type:
+        wsType && wsType !== "note-link" && wsType !== "database-link" ? wsType : undefined,
+      ws_parent: el.getAttribute("data-workspace-parent") ?? undefined,
     });
   });
   return {

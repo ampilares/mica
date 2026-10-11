@@ -7,9 +7,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use mica_core::{ContentHash, CoreError, VaultPath, WORKSPACE_DIR};
 use mica_db::{apply_ops as apply_db_ops, Database, DbOp, QueryResult};
-use mica_drawio::{apply_canvas_ops, CanvasOp, Scene};
+use mica_drawio::{apply_canvas_ops, CanvasOp, CellKind, Geometry, Scene, SceneCell};
 use mica_markdown::NoteDocument;
-use mica_search::{BacklinkHit, Graph, QuickSwitchHit, SearchHit, SearchIndex, TagCount};
+use mica_search::{BacklinkHit, DocMeta, Graph, QuickSwitchHit, SearchHit, SearchIndex, TagCount};
 use mica_vault::{slugify, FileTree, Vault};
 use mica_watch::{SelfWriteFilter, VaultEvent, VaultWatcher};
 
@@ -84,6 +84,22 @@ fn open_vault_inner(app: &AppHandle, state: &AppState, vault: Vault) -> ApiResul
             path: None,
         })?
     };
+
+    // History budgets (FR21-HIS-001): prune on open, config-overridable.
+    {
+        let extra = &vault.config().extra;
+        let max_per_file = extra
+            .get("history_max_per_file")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(50) as usize;
+        let max_age_days = extra
+            .get("history_max_age_days")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(90);
+        if let Err(e) = vault.history_prune(max_per_file, max_age_days) {
+            tracing::warn!("history prune failed: {e}");
+        }
+    }
 
     let info = VaultInfo {
         root: vault.root().display().to_string(),
@@ -199,7 +215,26 @@ fn guarded_write(
     if let Err(e) = open.index.lock().unwrap().update_file(&open.vault, path) {
         tracing::warn!("index update after save failed: {e}");
     }
+    // Local history snapshot (FR21-HIS-001): debounced/deduped in the vault.
+    if let Err(e) = open.vault.history_snapshot(path, content, false) {
+        tracing::warn!("history snapshot failed: {e}");
+    }
     Ok(hash)
+}
+
+/// File-name stem for a new note per the vault naming strategy (FR-SET-003).
+fn stem_for_title(config: &mica_vault::VaultConfig, title: &str) -> String {
+    if config.naming == "title" {
+        let cleaned: String = title
+            .trim()
+            .chars()
+            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { ' ' } else { c })
+            .collect();
+        let cleaned = cleaned.trim().to_string();
+        if cleaned.is_empty() { slugify(title) } else { cleaned }
+    } else {
+        slugify(title)
+    }
 }
 
 #[tauri::command]
@@ -212,17 +247,7 @@ pub fn note_create(
     let config = open.vault.config();
     let dir = dir.unwrap_or_else(|| config.notes_dir.clone());
     // Naming strategy (FR-SET): kebab-case slug (default) or title verbatim.
-    let stem = if config.naming == "title" {
-        let cleaned: String = title
-            .trim()
-            .chars()
-            .map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { ' ' } else { c })
-            .collect();
-        let cleaned = cleaned.trim().to_string();
-        if cleaned.is_empty() { slugify(&title) } else { cleaned }
-    } else {
-        slugify(&title)
-    };
+    let stem = stem_for_title(&config, &title);
     let path = open
         .vault
         .unique_path(&dir, &stem, "md")
@@ -267,6 +292,43 @@ pub fn note_save(
     Ok(SaveOutcome { version })
 }
 
+/// Rename a doc's edgeless sidecar canvas alongside the doc itself, fixing
+/// the note-link hrefs inside it that pointed at the doc (spec §2.3).
+fn pair_sidecar_rename(open: &OpenVault, from_md: &VaultPath, to_md: &VaultPath) {
+    let (Some(from_sc), Some(to_sc)) = (from_md.sidecar_canvas(), to_md.sidecar_canvas()) else {
+        return;
+    };
+    if !open.vault.exists(&from_sc) {
+        return;
+    }
+    if let Err(e) = open.vault.rename(&from_sc, &to_sc) {
+        tracing::warn!("sidecar rename failed: {e}");
+        return;
+    }
+    if let Ok((content, _)) = open.vault.read_text(&to_sc) {
+        if let Ok(mut scene) = Scene::parse(&content) {
+            let mut changed = false;
+            for cell in &mut scene.cells {
+                if let Some(href) = &cell.href {
+                    if href_to_vault_path(&from_sc, href).as_deref() == Some(from_md.as_str()) {
+                        cell.href = Some(vault_path_to_href(&to_sc, to_md.as_str()));
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                if let Ok(new_content) = scene.serialize() {
+                    if let Ok(hash) = open.vault.write_text(&to_sc, &new_content) {
+                        open.filter.record(&open.vault.abs(&to_sc), hash);
+                    }
+                }
+            }
+        }
+    }
+    // Sidecars aren't indexed, but a stale v1 row for the old path may exist.
+    let _ = open.index.lock().unwrap().remove_file(&from_sc);
+}
+
 #[tauri::command]
 pub fn note_rename(
     state: State<'_, AppState>,
@@ -304,10 +366,13 @@ pub fn note_rename(
         }
     }
 
-    let mut idx = open.index.lock().unwrap();
-    if let Err(e) = idx.rename_file(&open.vault, &from, &to) {
-        tracing::warn!("index rename failed: {e}");
+    {
+        let mut idx = open.index.lock().unwrap();
+        if let Err(e) = idx.rename_file(&open.vault, &from, &to) {
+            tracing::warn!("index rename failed: {e}");
+        }
     }
+    pair_sidecar_rename(&open, &from, &to);
     Ok(to)
 }
 
@@ -338,6 +403,31 @@ pub fn note_duplicate(state: State<'_, AppState>, path: String) -> ApiResult<Loa
         content
     };
     let version = guarded_write(&open, &copy_path, &content, None)?;
+
+    // Duplicate the edgeless sidecar too, retargeting its doc links.
+    if let (Some(from_sc), Some(to_sc)) = (rel.sidecar_canvas(), copy_path.sidecar_canvas()) {
+        if open.vault.exists(&from_sc) && !open.vault.exists(&to_sc) {
+            if let Ok((sc_content, _)) = open.vault.read_text(&from_sc) {
+                if let Ok(mut scene) = Scene::parse(&sc_content) {
+                    for cell in &mut scene.cells {
+                        if let Some(href) = &cell.href {
+                            if href_to_vault_path(&from_sc, href).as_deref() == Some(rel.as_str())
+                            {
+                                cell.href =
+                                    Some(vault_path_to_href(&to_sc, copy_path.as_str()));
+                            }
+                        }
+                    }
+                    if let Ok(out) = scene.serialize() {
+                        if let Ok(hash) = open.vault.write_text(&to_sc, &out) {
+                            open.filter.record(&open.vault.abs(&to_sc), hash);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(LoadedFile {
         path: copy_path,
         content,
@@ -903,6 +993,634 @@ pub fn export_file(dest: String, data_base64: String) -> ApiResult<()> {
         message: e.to_string(),
         path: Some(dest.clone()),
     })
+}
+
+// ------------------------------------------------------ docs & metadata ----
+
+/// All docs with list metadata (spec §2.1). Index-backed; sidecar existence
+/// is checked against the filesystem.
+#[tauri::command]
+pub fn docs_list(state: State<'_, AppState>) -> ApiResult<Vec<DocMeta>> {
+    let open = state.current().map_err(ApiError::from)?;
+    let mut docs = {
+        let idx = open.index.lock().unwrap();
+        idx.docs_list().map_err(ApiError::from)?
+    };
+    // One tree walk beats a filesystem stat per doc on large vaults.
+    let sidecars: std::collections::HashSet<String> = open
+        .vault
+        .scan_tree()
+        .map(|tree| {
+            tree.files()
+                .iter()
+                .filter(|f| f.path.is_sidecar_canvas())
+                .map(|f| f.path.as_str().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    for doc in &mut docs {
+        if let Some(sidecar) = doc.path.sidecar_canvas() {
+            doc.has_canvas = sidecars.contains(sidecar.as_str());
+        }
+    }
+    Ok(docs)
+}
+
+/// Frontmatter of a note as a JSON object (Info panel).
+#[tauri::command]
+pub fn note_meta_get(
+    state: State<'_, AppState>,
+    path: String,
+) -> ApiResult<serde_json::Map<String, serde_json::Value>> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let (content, _) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    mica_markdown::frontmatter_json(&content).map_err(ApiError::from)
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetaSetOutcome {
+    pub content: String,
+    pub version: ContentHash,
+}
+
+/// Merge-patch a note's frontmatter (null deletes a key); the body is never
+/// touched (spec §2.4).
+#[tauri::command]
+pub fn note_meta_set(
+    state: State<'_, AppState>,
+    path: String,
+    patch: serde_json::Value,
+    base_version: String,
+) -> ApiResult<MetaSetOutcome> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let (content, disk_version) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    if disk_version.as_str() != base_version {
+        return Err(ApiError::from(CoreError::Conflict { path: rel }));
+    }
+    let new_content = mica_markdown::apply_meta_patch(&content, &patch).map_err(ApiError::from)?;
+    let version = guarded_write(&open, &rel, &new_content, Some(disk_version.as_str()))?;
+    Ok(MetaSetOutcome {
+        content: new_content,
+        version,
+    })
+}
+
+/// Open a doc's edgeless sidecar canvas, creating it (with a linked note
+/// card for the doc) on first use (spec §1.2 / §2.3).
+#[tauri::command]
+pub fn canvas_sidecar_ensure(state: State<'_, AppState>, path: String) -> ApiResult<LoadedFile> {
+    let open = state.current().map_err(ApiError::from)?;
+    let md = VaultPath::new(&path).map_err(ApiError::from)?;
+    let sidecar = md.sidecar_canvas().ok_or_else(|| ApiError {
+        code: "not_a_doc".into(),
+        message: "only .md docs have an edgeless sidecar".into(),
+        path: Some(path.clone()),
+    })?;
+    if open.vault.exists(&sidecar) {
+        let (content, version) = open.vault.read_text(&sidecar).map_err(ApiError::from)?;
+        Scene::parse(&content).map_err(ApiError::from)?;
+        return Ok(LoadedFile {
+            path: sidecar,
+            content,
+            version,
+        });
+    }
+    // Title from the doc's frontmatter/H1, falling back to the file stem.
+    let title = open
+        .vault
+        .read_text(&md)
+        .ok()
+        .and_then(|(c, _)| mica_markdown::extract_metadata(&c, md.stem()).title)
+        .unwrap_or_else(|| md.stem().to_string());
+    let mut scene = Scene::new(&title);
+    scene.cells.push(SceneCell {
+        id: mica_core::RecordId::new(mica_core::IdKind::Shape).to_string(),
+        kind: CellKind::NoteLink,
+        label: title.clone(),
+        geometry: Some(Geometry {
+            x: 80.0,
+            y: 80.0,
+            width: 360.0,
+            height: 200.0,
+        }),
+        parent: None,
+        source: None,
+        target: None,
+        style: None,
+        href: Some(md.file_name().to_string()),
+        view: None,
+        ws_type: None,
+        ws_parent: None,
+    });
+    let content = scene.serialize().map_err(ApiError::from)?;
+    let version = guarded_write(&open, &sidecar, &content, None)?;
+    Ok(LoadedFile {
+        path: sidecar,
+        content,
+        version,
+    })
+}
+
+/// Open (or create) the journal doc for an ISO date (spec §4.2): the file is
+/// always `journals/<date>.md`, titled like "Jul 20, 2026", with a `journal`
+/// frontmatter key. Body comes from the configured template when present.
+#[tauri::command]
+pub fn journal_ensure(state: State<'_, AppState>, date: String) -> ApiResult<LoadedFile> {
+    let open = state.current().map_err(ApiError::from)?;
+    let valid = date.len() == 10
+        && date.bytes().enumerate().all(|(i, b)| match i {
+            4 | 7 => b == b'-',
+            _ => b.is_ascii_digit(),
+        });
+    if !valid {
+        return Err(ApiError {
+            code: "bad_date".into(),
+            message: format!("not an ISO date: {date}"),
+            path: None,
+        });
+    }
+    let path = VaultPath::new(&format!("journals/{date}.md")).map_err(ApiError::from)?;
+    if open.vault.exists(&path) {
+        let (content, version) = open.vault.read_text(&path).map_err(ApiError::from)?;
+        return Ok(LoadedFile {
+            path,
+            content,
+            version,
+        });
+    }
+
+    let title = journal_title(&date);
+    // Optional template: its body (frontmatter stripped) seeds the journal.
+    let template_body = open
+        .vault
+        .config()
+        .extra
+        .get("journal_template")
+        .and_then(|v| v.as_str())
+        .and_then(|p| VaultPath::new(p).ok())
+        .and_then(|p| open.vault.read_text(&p).ok())
+        .map(|(text, _)| mica_markdown::split_frontmatter(&text).1.to_string());
+
+    let mut content = NoteDocument::new_note_content(&title).map_err(ApiError::from)?;
+    if let Some(body) = template_body {
+        let mut doc = NoteDocument::parse(&content).map_err(ApiError::from)?;
+        doc.body = format!("# {title}\n\n{body}");
+        content = doc.serialize().map_err(ApiError::from)?;
+    }
+    let content =
+        mica_markdown::apply_meta_patch(&content, &serde_json::json!({ "journal": date }))
+            .map_err(ApiError::from)?;
+    let version = guarded_write(&open, &path, &content, None)?;
+    Ok(LoadedFile {
+        path,
+        content,
+        version,
+    })
+}
+
+fn journal_title(date: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let parts: Vec<&str> = date.split('-').collect();
+    let (year, month, day) = (
+        parts[0],
+        parts[1].parse::<usize>().unwrap_or(1).clamp(1, 12),
+        parts[2].trim_start_matches('0'),
+    );
+    let day = if day.is_empty() { "1" } else { day };
+    format!("{} {day}, {year}", MONTHS[month - 1])
+}
+
+// ------------------------------------------------- v2.1 free-tier core ----
+
+/// File metadata for attachment cards (FR21-BLK-005).
+#[derive(Debug, Serialize)]
+pub struct AssetStat {
+    pub size: u64,
+    pub mtime: String,
+}
+
+#[tauri::command]
+pub fn asset_stat(state: State<'_, AppState>, path: String) -> ApiResult<AssetStat> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let abs = open.vault.abs(&rel);
+    let meta = std::fs::metadata(&abs).map_err(|e| ApiError::from(CoreError::io(&abs, e)))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| mica_core::rfc3339_from_unix(d.as_secs() as i64))
+        .unwrap_or_default();
+    Ok(AssetStat {
+        size: meta.len(),
+        mtime,
+    })
+}
+
+/// Markdown slice for wiki embeds (FR21-BLK-008): whole body, or the section
+/// under `heading`. Missing headings surface as an error the embed renders.
+#[tauri::command]
+pub fn note_section(
+    state: State<'_, AppState>,
+    path: String,
+    heading: Option<String>,
+) -> ApiResult<String> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let (content, _) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    mica_markdown::section(&content, heading.as_deref()).ok_or_else(|| ApiError {
+        code: "heading_not_found".into(),
+        message: format!("heading not found: {}", heading.unwrap_or_default()),
+        path: Some(path),
+    })
+}
+
+// ----------------------------------------------------------- link cards ----
+
+/// Open an external http(s) URL in the system browser (NFR-SEC-004: links
+/// open with explicit user intent — this is only called from clicks).
+#[tauri::command]
+pub fn open_url(url: String) -> ApiResult<()> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(ApiError {
+            code: "bad_url".into(),
+            message: "only http(s) URLs can be opened".into(),
+            path: None,
+        });
+    }
+    tauri_plugin_opener::open_url(&url, None::<String>).map_err(|e| ApiError {
+        code: "open_failed".into(),
+        message: e.to_string(),
+        path: None,
+    })
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct LinkPreview {
+    pub title: String,
+    pub description: String,
+    /// Site favicon URL (not fetched; the webview loads it directly).
+    pub favicon: String,
+}
+
+/// Fetch title/description for a link card (FR21-BLK-006). Gated by the
+/// per-vault `link_previews: true` opt-in (spec §1.6) — the free app makes
+/// no network calls without it. Results cache in `.workspace/linkmeta.json`.
+#[tauri::command]
+pub fn link_preview(state: State<'_, AppState>, url: String) -> ApiResult<LinkPreview> {
+    let open = state.current().map_err(ApiError::from)?;
+    let enabled = open
+        .vault
+        .config()
+        .extra
+        .get("link_previews")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !enabled {
+        return Err(ApiError {
+            code: "previews_disabled".into(),
+            message: "Link previews are disabled for this vault (Settings → Workspace).".into(),
+            path: None,
+        });
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(ApiError {
+            code: "bad_url".into(),
+            message: "only http(s) URLs can be previewed".into(),
+            path: None,
+        });
+    }
+
+    // Cache first (rebuildable, cache-class — spec §4).
+    let cache_path = open
+        .vault
+        .root()
+        .join(WORKSPACE_DIR)
+        .join("linkmeta.json");
+    let mut cache: BTreeMap<String, LinkPreview> = std::fs::read_to_string(&cache_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    if let Some(hit) = cache.get(&url) {
+        return Ok(hit.clone());
+    }
+
+    let body = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(6))
+        .set("user-agent", "Mica/2.1 (+link-preview)")
+        .call()
+        .map_err(|e| ApiError {
+            code: "fetch_failed".into(),
+            message: e.to_string(),
+            path: None,
+        })?
+        .into_reader();
+    // Cap at 512 KiB — enough for <head> metadata on any sane page.
+    use std::io::Read as _;
+    let mut buf = Vec::with_capacity(64 * 1024);
+    let _ = body.take(512 * 1024).read_to_end(&mut buf);
+    let html = String::from_utf8_lossy(&buf);
+
+    let pick = |re: &str| -> String {
+        regex::Regex::new(re)
+            .ok()
+            .and_then(|r| r.captures(&html))
+            .and_then(|c| c.get(1))
+            .map(|m| html_unescape(m.as_str().trim()))
+            .unwrap_or_default()
+    };
+    let title = {
+        let og = pick(r#"(?is)<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']"#);
+        if og.is_empty() {
+            pick(r"(?is)<title[^>]*>([^<]+)</title>")
+        } else {
+            og
+        }
+    };
+    let description = {
+        let og =
+            pick(r#"(?is)<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']"#);
+        if og.is_empty() {
+            pick(r#"(?is)<meta[^>]+name=["']description["'][^>]+content=["']([^"']+)["']"#)
+        } else {
+            og
+        }
+    };
+    // Favicon: site-root default; the webview falls back gracefully on 404.
+    let favicon = url
+        .split('/')
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("/")
+        + "/favicon.ico";
+
+    let preview = LinkPreview {
+        title: if title.is_empty() { url.clone() } else { title },
+        description,
+        favicon,
+    };
+    cache.insert(url, preview.clone());
+    if let Ok(mut bytes) = serde_json::to_vec_pretty(&cache) {
+        bytes.push(b'\n');
+        let _ = mica_vault::atomic_write(&cache_path, &bytes);
+    }
+    Ok(preview)
+}
+
+fn html_unescape(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+}
+
+// ------------------------------------------------------------- templates ----
+
+#[derive(Debug, Serialize)]
+pub struct TemplateInfo {
+    pub path: VaultPath,
+    pub title: String,
+}
+
+/// Every `.md` under `templates/` is a template (FR21-TPL-001).
+#[tauri::command]
+pub fn template_list(state: State<'_, AppState>) -> ApiResult<Vec<TemplateInfo>> {
+    let open = state.current().map_err(ApiError::from)?;
+    let dir = open.vault.root().join("templates");
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(&dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let Ok(rel) = VaultPath::from_absolute(open.vault.root(), entry.path()) else {
+            continue;
+        };
+        if rel.extension() != Some("md") {
+            continue;
+        }
+        let title = open
+            .vault
+            .read_text(&rel)
+            .ok()
+            .and_then(|(c, _)| mica_markdown::extract_metadata(&c, rel.stem()).title)
+            .unwrap_or_else(|| rel.stem().to_string());
+        out.push(TemplateInfo { path: rel, title });
+    }
+    out.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    Ok(out)
+}
+
+/// `{{title}}`, `{{date}}`, `{{time}}`, `{{date:FMT}}` substitution
+/// (FR21-TPL-003). FMT tokens: YYYY, MMM, MM, DD, D.
+fn substitute_template_vars(body: &str, title: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let now = mica_core::now_rfc3339(); // YYYY-MM-DDTHH:MM:SS…
+    let (y, mo, d, hh, mi) = (
+        &now[0..4],
+        &now[5..7],
+        &now[8..10],
+        &now[11..13],
+        &now[14..16],
+    );
+    let month_idx = mo.parse::<usize>().unwrap_or(1).clamp(1, 12) - 1;
+    let day_short = d.trim_start_matches('0');
+    let day_short = if day_short.is_empty() { "1" } else { day_short };
+
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let token = after[..end].trim();
+        let replacement = match token {
+            "title" => title.to_string(),
+            "date" => format!("{y}-{mo}-{d}"),
+            "time" => format!("{hh}:{mi}"),
+            _ => match token.strip_prefix("date:") {
+                Some(fmt) => fmt
+                    .replace("YYYY", y)
+                    .replace("MMM", MONTHS[month_idx])
+                    .replace("MM", mo)
+                    .replace("DD", d)
+                    .replace('D', day_short),
+                None => format!("{{{{{token}}}}}"), // unknown token: verbatim
+            },
+        };
+        out.push_str(&replacement);
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// New doc from a template (FR21-TPL): fresh id, given title, substituted
+/// body; file named by the vault naming strategy.
+#[tauri::command]
+pub fn template_instantiate(
+    state: State<'_, AppState>,
+    template: String,
+    title: String,
+    dir: Option<String>,
+) -> ApiResult<LoadedFile> {
+    let open = state.current().map_err(ApiError::from)?;
+    let config = open.vault.config();
+    let tpl_path = VaultPath::new(&template).map_err(ApiError::from)?;
+    let (tpl_content, _) = open.vault.read_text(&tpl_path).map_err(ApiError::from)?;
+
+    let mut doc = NoteDocument::parse(&tpl_content).map_err(ApiError::from)?;
+    doc.body = substitute_template_vars(&doc.body, &title);
+    let mut fm = doc.frontmatter.take().unwrap_or_default();
+    let now = mica_core::now_rfc3339();
+    fm.set_str(
+        "id",
+        &mica_core::RecordId::new(mica_core::IdKind::Note).to_string(),
+    );
+    fm.set_str("title", &title);
+    fm.set_str("created", &now);
+    fm.set_str("updated", &now);
+    fm.set_u32("schema_version", mica_core::NOTE_SCHEMA_VERSION);
+    doc.frontmatter = Some(fm);
+    doc.raw_frontmatter = None;
+    let content = doc.serialize().map_err(ApiError::from)?;
+
+    let dir = dir.unwrap_or_else(|| config.notes_dir.clone());
+    let path = open
+        .vault
+        .unique_path(&dir, &stem_for_title(&config, &title), "md")
+        .map_err(ApiError::from)?;
+    let version = guarded_write(&open, &path, &content, None)?;
+    Ok(LoadedFile {
+        path,
+        content,
+        version,
+    })
+}
+
+// --------------------------------------------------------------- history ----
+
+#[tauri::command]
+pub fn history_list(
+    state: State<'_, AppState>,
+    path: String,
+) -> ApiResult<Vec<mica_vault::HistoryEntry>> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    open.vault.history_list(&rel).map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn history_read(
+    state: State<'_, AppState>,
+    path: String,
+    stamp: String,
+) -> ApiResult<String> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    open.vault.history_read(&rel, &stamp).map_err(ApiError::from)
+}
+
+/// Restore a snapshot (FR21-HIS-002). The current on-disk state is
+/// force-snapshotted first so a restore can itself be undone.
+#[tauri::command]
+pub fn history_restore(
+    state: State<'_, AppState>,
+    path: String,
+    stamp: String,
+    base_version: String,
+) -> ApiResult<MetaSetOutcome> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let snapshot = open.vault.history_read(&rel, &stamp).map_err(ApiError::from)?;
+    let (current, disk_version) = open.vault.read_text(&rel).map_err(ApiError::from)?;
+    if disk_version.as_str() != base_version {
+        return Err(ApiError::from(CoreError::Conflict { path: rel }));
+    }
+    if let Err(e) = open.vault.history_snapshot(&rel, &current, true) {
+        tracing::warn!("pre-restore snapshot failed: {e}");
+    }
+    let version = guarded_write(&open, &rel, &snapshot, Some(disk_version.as_str()))?;
+    Ok(MetaSetOutcome {
+        content: snapshot,
+        version,
+    })
+}
+
+// ----------------------------------------------------------------- trash ----
+
+/// Move a file (and its sidecar canvas) to `.trash/` (spec §1.3). Emits a
+/// synthetic deleted event so open tabs close; the watcher can't see into
+/// dot-folders.
+#[tauri::command]
+pub fn trash_move(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> ApiResult<Vec<VaultPath>> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&path).map_err(ApiError::from)?;
+    let moved = open.vault.trash_move(&rel).map_err(ApiError::from)?;
+    {
+        let mut idx = open.index.lock().unwrap();
+        let _ = idx.remove_file(&rel);
+        if let Some(sidecar) = rel.sidecar_canvas() {
+            let _ = idx.remove_file(&sidecar);
+        }
+    }
+    let _ = app.emit("vault:events", &vec![VaultEvent::Deleted { path: rel }]);
+    Ok(moved)
+}
+
+#[tauri::command]
+pub fn trash_list(state: State<'_, AppState>) -> ApiResult<Vec<mica_vault::TrashEntry>> {
+    let open = state.current().map_err(ApiError::from)?;
+    open.vault.trash_list().map_err(ApiError::from)
+}
+
+#[tauri::command]
+pub fn trash_restore(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    trash_path: String,
+) -> ApiResult<VaultPath> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = VaultPath::new(&trash_path).map_err(ApiError::from)?;
+    let restored = open.vault.trash_restore(&rel).map_err(ApiError::from)?;
+    if let Err(e) = open.index.lock().unwrap().update_file(&open.vault, &restored) {
+        tracing::warn!("index update after restore failed: {e}");
+    }
+    let _ = app.emit(
+        "vault:events",
+        &vec![VaultEvent::Created {
+            path: restored.clone(),
+        }],
+    );
+    Ok(restored)
+}
+
+/// Permanently delete one trash entry, or empty the trash when no path is
+/// given. Returns the number of files removed.
+#[tauri::command]
+pub fn trash_purge(state: State<'_, AppState>, trash_path: Option<String>) -> ApiResult<u32> {
+    let open = state.current().map_err(ApiError::from)?;
+    let rel = match &trash_path {
+        Some(p) => Some(VaultPath::new(p).map_err(ApiError::from)?),
+        None => None,
+    };
+    open.vault.trash_purge(rel.as_ref()).map_err(ApiError::from)
 }
 
 // ---------------------------------------------------------------- search ----

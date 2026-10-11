@@ -1,0 +1,61 @@
+/* Split view layout (spec §3.2). Only active when the store holds two panes;
+   single-pane rendering keeps the original `.main > .tabs + .content` DOM. */
+
+.panes-split {
+  flex: 1;
+  display: flex;
+  flex-direction: row;
+  min-height: 0;
+  min-width: 0;
+}
+
+.pane-column {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+/* Active-pane cue: accent bar on top + full-strength tab strip; the inactive
+   pane's tab strip is dimmed. */
+.pane-column.active::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  z-index: 5;
+  pointer-events: none;
+}
+.pane-column.inactive .tabs {
+  opacity: 0.55;
+}
+
+/* Drop target highlight while dragging a tab over the other pane's content. */
+.pane-column .content.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -6px;
+  background: var(--accent-soft);
+}
+
+.pane-divider {
+  flex: 0 0 5px;
+  align-self: stretch;
+  cursor: col-resize;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  transition: background 0.1s ease;
+}
+.pane-divider:hover {
+  background: var(--accent-soft);
+}
+
+/* Dragged tabs get a slight lift affordance. */
+.tab[draggable="true"]:active {
+  cursor: grabbing;
+}

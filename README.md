@@ -1,6 +1,8 @@
 # Mica
 
-A local-first, file-native notes workspace built with Rust and Tauri.
+A local-first, file-native notes workspace built with Rust and Tauri, with an
+AFFiNE-style doc-centric UX: All docs, Journals, Collections, Tags, Favorites,
+Trash, and dual-mode Page/Edgeless docs.
 
 Write block-based notes, manage structured databases, and think on an infinite
 canvas — while every canonical record lives as an ordinary file in a folder you
@@ -8,9 +10,15 @@ own (the **vault**):
 
 | Record type | Canonical format | Extension |
 |---|---|---|
-| Note | Markdown + optional YAML frontmatter | `.md` |
+| Doc (page mode) | Markdown + optional YAML frontmatter | `.md` |
+| Doc (edgeless mode) | Uncompressed draw.io XML sidecar | `<doc>.canvas.drawio` |
 | Database | Deterministic JSON | `.database.json` |
-| Canvas | Uncompressed draw.io-compatible XML | `.drawio` |
+| Whiteboard | Uncompressed draw.io-compatible XML | `.drawio` |
+| Trash | Files moved (not copied) under | `.trash/` |
+
+The core app is free and complete offline. Paid **Mica Pro** services (sync,
+collaboration, publishing, AI) are planned as additive services on the same
+plain files — never proprietary formats. See [docs/v2.1/PRD.md](docs/v2.1/PRD.md).
 
 Everything else (search index, thumbnails, view state) is a rebuildable cache
 under `.workspace/` and never the source of truth. See [docs/PRD.md](docs/PRD.md),
@@ -53,6 +61,8 @@ cd apps/desktop && npx tsc --noEmit
 
 ## Status
 
-MVP in progress — vault + notes + search + databases + canvas are functional
-end-to-end; hardening (benchmarks, fuzzing, installers) tracked in
-[docs/implementation.md](docs/implementation.md) Phase 5.
+v2 (AFFiNE-parity rewrite) in progress on the `redesign` branch — the
+doc-centric shell (All docs, Journals, Collections, Tags, Favorites, Trash,
+Page/Edgeless docs, Info/Outline panels, quick search) is functional
+end-to-end on the v1 Rust core; remaining hardening is tracked in
+[docs/implementation.md](docs/implementation.md) Phase R7.

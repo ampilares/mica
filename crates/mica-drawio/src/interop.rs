@@ -42,6 +42,8 @@ pub fn import_obsidian(name: &str, json_text: &str) -> Result<Scene> {
                 style: None,
                 href: None,
                 view: None,
+                ws_type: None,
+                ws_parent: None,
             },
             "file" => {
                 let file = str_of(node, "file").unwrap_or_default();
@@ -67,6 +69,8 @@ pub fn import_obsidian(name: &str, json_text: &str) -> Result<Scene> {
                     style: None,
                     href: Some(file),
                     view: None,
+                    ws_type: None,
+                    ws_parent: None,
                 }
             }
             "group" => SceneCell {
@@ -80,6 +84,8 @@ pub fn import_obsidian(name: &str, json_text: &str) -> Result<Scene> {
                 style: None,
                 href: None,
                 view: None,
+                ws_type: None,
+                ws_parent: None,
             },
             // Links (type "link") and unknown node types become labelled boxes.
             _ => SceneCell {
@@ -95,6 +101,8 @@ pub fn import_obsidian(name: &str, json_text: &str) -> Result<Scene> {
                 style: None,
                 href: None,
                 view: None,
+                ws_type: None,
+                ws_parent: None,
             },
         };
         scene.cells.push(cell);
@@ -116,6 +124,8 @@ pub fn import_obsidian(name: &str, json_text: &str) -> Result<Scene> {
             style: None,
             href: None,
             view: None,
+            ws_type: None,
+            ws_parent: None,
         });
     }
 
@@ -258,6 +268,8 @@ pub fn import_excalidraw(name: &str, json_text: &str) -> Result<Scene> {
                     style: None,
                     href: None,
                     view: None,
+                    ws_type: None,
+                    ws_parent: None,
                 });
                 continue;
             }
@@ -278,6 +290,8 @@ pub fn import_excalidraw(name: &str, json_text: &str) -> Result<Scene> {
             style: None,
             href: None,
             view: None,
+            ws_type: None,
+            ws_parent: None,
         });
     }
     Ok(scene)

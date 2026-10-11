@@ -11,7 +11,7 @@ use notify::RecommendedWatcher;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
 use serde::{Deserialize, Serialize};
 
-use mica_core::{ContentHash, VaultPath, WORKSPACE_DIR};
+use mica_core::{ContentHash, VaultPath};
 
 /// A change that happened on disk, already classified and vault-relative.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,12 +133,12 @@ fn classify(
 
     let to_rel = |p: &PathBuf| -> Option<VaultPath> {
         let rel = VaultPath::from_absolute(root, p).ok()?;
-        // Ignore the hidden workspace folder and editor temp files.
-        if rel.as_str().starts_with(WORKSPACE_DIR) {
+        // Ignore hidden folders and files (.workspace, .trash, dotfiles) at
+        // any depth, plus editor temp files.
+        if rel.as_str().split('/').any(|c| c.starts_with('.')) {
             return None;
         }
-        let name = rel.file_name();
-        if name.starts_with(".mica-tmp-") || name.ends_with(".tmp") || name.starts_with('.') {
+        if rel.file_name().ends_with(".tmp") {
             return None;
         }
         Some(rel)

@@ -8,7 +8,6 @@ import { oneDarkHighlightStyle } from "@codemirror/theme-one-dark";
 import { api, isApiError } from "../api";
 import { useStore, titleOfPath } from "../store";
 import { docEvents } from "../docEvents";
-import ModeToggle from "./ModeToggle";
 import { useSettings } from "../settings";
 
 /**
@@ -190,7 +189,6 @@ export default function SourceEditor({ path, active }: { path: string; active: b
       )}
       <div className="note-header">
         <div className="note-title">{titleOfPath(path)}</div>
-        <ModeToggle path={path} />
       </div>
       <div ref={hostRef} className="source-editor-host" />
     </div>
